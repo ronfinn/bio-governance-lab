@@ -10,12 +10,14 @@ subject data ever belongs in this repository.
 
 ## Current milestone
 
-Milestone 3: domain models, CLI, tests, CI, deterministic synthetic study
-generation, plus YAML data contracts and contract validation.
+Milestone 4: domain models, CLI, tests, CI, deterministic synthetic study
+generation, YAML data contracts and contract validation, plus a Nextflow
+pipeline that gates curation on those contracts.
 
 **Not yet implemented, and not to be added without being asked:** data-quality
-scoring, Nextflow, OpenLineage, OpenMetadata, DataHub, MCP, AI-agent
-governance.
+scoring, OpenLineage, OpenMetadata, DataHub, MCP, AI-agent governance. The
+pipeline is local-execution only: no Kubernetes, Seqera Platform, cloud
+executor, container registry or DSL2 module library.
 
 ## Commands
 
@@ -30,6 +32,10 @@ uv run bio-gov demo generate  # write a synthetic study to data/raw/
 
 # validate generated data against a contract
 uv run bio-gov contract validate contracts/samples.v1.yaml data/raw/BIO-001/samples.csv
+
+# run the contract-gated pipeline (needs Nextflow and a JVM, installed separately)
+nextflow run pipelines/nextflow/main.nf
+nextflow run pipelines/nextflow/main.nf --study_dir data/raw/BIO-002   # a broken study
 ```
 
 CI runs `ruff check .`, `ruff format --check .`, `mypy src` and `pytest`. Run
@@ -47,6 +53,8 @@ all four before committing.
   result models, `loader.py` for YAML loading, `validator.py` for applying a
   contract to a CSV. Export new public names from `contracts/__init__.py`.
 - `contracts/` — the contract definitions themselves, as YAML. Committed.
+- `pipelines/nextflow/` — `main.nf` holds the DSL2 workflow, `nextflow.config`
+  its parameters and manifest. Nothing else belongs here.
 - `src/bio_governance/cli.py` — the `bio-gov` Typer app. The `demo` sub-app
   hosts generation commands; the `contract` sub-app hosts validation.
 - `tests/` — mirrors the source modules. Shared fixtures live in `conftest.py`.
@@ -54,6 +62,7 @@ all four before committing.
   `synthetic-data.md` (the generated study), `data-contracts.md` (the contract
   format and validation).
 - `data/` — generated output. Git-ignored; never commit generated data.
+- `results/` — pipeline output. Git-ignored, like `work/` and `.nextflow*`.
 
 ## Conventions
 
@@ -96,6 +105,20 @@ all four before committing.
   paths, URIs, connectors or remote storage.
 - **Standard library only for generation.** Do not add pandas or numpy without a
   concrete need.
+- **The pipeline shells out to `bio-gov`.** A gate process runs
+  `bio-gov contract validate` and lets the exit code decide; it never imports
+  `validate_dataset`. The exit code is the orchestrator-agnostic interface.
+- **The gate is structural.** `CURATE` consumes the samples gate's output
+  channel, which consumes the compounds gate's. Never give a downstream process
+  a path to raw data that bypasses a gate, and never soften
+  `errorStrategy = 'terminate'` — a contract violation is a verdict, not a
+  transient failure.
+- **Processes carry governance in their names.** `CONTRACT_GATE_*` so a run log
+  shows where the decision happened.
+- **The curated step stays trivial.** It copies files. Do not invent a
+  scientific transformation to make the pipeline look substantial.
+- **Nextflow is not a Python dependency.** It is installed separately and CI does
+  not install it.
 - Line length is 100. Ruff owns formatting.
 
 ## Testing
@@ -107,6 +130,11 @@ project, not an afterthought. CLI changes get a smoke test.
 Generator tests write to `tmp_path` and never leave files in the repository.
 Every bad-data injection gets a test proving it introduces its intended defect,
 and determinism is asserted by comparing bytes across two runs.
+
+Pipeline tests run Nextflow for real, under `tmp_path`, and skip when Nextflow
+is not on `PATH`; the static assertions about parameters, process names and the
+gate ordering run everywhere. Both the clean and the gated-out case are tested,
+and the failing case asserts that no curated directory is written.
 
 Contract tests load the real YAML from `contracts/` rather than inline
 definitions, so the shipped contracts are what is under test. Every `--inject-*`

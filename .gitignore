@@ -19,6 +19,12 @@ htmlcov/
 # Generated demonstration data (regenerate with: uv run bio-gov demo generate)
 data/
 
+# Nextflow run artefacts and pipeline output
+work/
+results/
+.nextflow/
+.nextflow.log*
+
 # Editors / OS
 .DS_Store
 .idea/
