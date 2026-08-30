@@ -1,15 +1,21 @@
 #!/usr/bin/env nextflow
 
 /*
- * bio-governance-lab — contract-gated curation pipeline.
+ * bio-governance-lab — governance-gated curation pipeline.
  *
- * Raw synthetic study -> contract gate -> curated output.
+ * Raw synthetic study -> contract gates -> data-quality gate -> curated output.
  *
- * The gate is the point of this pipeline. CURATE has no input that does not
- * come through CONTRACT_GATE_SAMPLES, which in turn runs only after
- * CONTRACT_GATE_COMPOUNDS, so a dataset that breaks its contract cannot reach
- * the curated directory. `bio-gov contract validate` exits non-zero on a
- * violation, Nextflow terminates the run, and nothing is published.
+ * The gates are the point of this pipeline. CURATE has no input that does not
+ * come through RUN_DATA_QUALITY, which runs only after CONTRACT_GATE_SAMPLES,
+ * which runs only after CONTRACT_GATE_COMPOUNDS. So a study that breaks a
+ * contract or fails a quality check cannot reach the curated directory: the
+ * `bio-gov` command exits non-zero, Nextflow terminates the run, and nothing
+ * downstream is published.
+ *
+ * The two gates ask different questions. A contract asks whether one file
+ * conforms to its declared structure; data quality asks whether the study as a
+ * whole is consistent and usable. Deleting the vehicle controls from
+ * samples.csv passes every contract and fails the quality gate.
  */
 
 nextflow.enable.dsl = 2
@@ -52,6 +58,26 @@ process CONTRACT_GATE_SAMPLES {
     """
 }
 
+process RUN_DATA_QUALITY {
+    tag "${study}"
+    publishDir "${params.outdir}/${study}/quality", mode: 'copy'
+
+    input:
+    tuple val(study), path(study_json), path(samples), path(compounds), path(expression)
+
+    output:
+    tuple val(study), path('dq-report.json')
+
+    script:
+    // All four files are staged here, so the work directory *is* the study
+    // directory the checks read. The JSON report is written before the exit
+    // status is decided, so a failing run still leaves its evidence behind.
+    """
+    echo "DATA QUALITY GATE: ${study}"
+    ${params.bio_gov} dq run . --json-out dq-report.json
+    """
+}
+
 process CURATE {
     tag "${study}"
     publishDir "${params.outdir}/${study}", mode: 'copy'
@@ -78,6 +104,7 @@ workflow {
     def study_dir = file(params.study_dir, checkIfExists: true)
     def study     = study_dir.name
 
+    def study_json = file("${study_dir}/study.json",     checkIfExists: true)
     def samples    = file("${study_dir}/samples.csv",    checkIfExists: true)
     def compounds  = file("${study_dir}/compounds.csv",  checkIfExists: true)
     def expression = file("${study_dir}/expression.csv", checkIfExists: true)
@@ -97,7 +124,11 @@ workflow {
         compounds_passed.map { s, _report -> tuple(s, samples, compounds, samples_contract) }
     )
 
+    def quality_passed = RUN_DATA_QUALITY(
+        samples_passed.map { s, _report -> tuple(s, study_json, samples, compounds, expression) }
+    )
+
     CURATE(
-        samples_passed.map { s, _report -> tuple(s, samples, compounds, expression) }
+        quality_passed.map { s, _report -> tuple(s, samples, compounds, expression) }
     )
 }

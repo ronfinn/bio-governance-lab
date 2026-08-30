@@ -10,14 +10,15 @@ subject data ever belongs in this repository.
 
 ## Current milestone
 
-Milestone 4: domain models, CLI, tests, CI, deterministic synthetic study
-generation, YAML data contracts and contract validation, plus a Nextflow
-pipeline that gates curation on those contracts.
+Milestone 5: domain models, CLI, tests, CI, deterministic synthetic study
+generation, YAML data contracts and contract validation, study-level
+data-quality checks, and a Nextflow pipeline that gates curation on both.
 
-**Not yet implemented, and not to be added without being asked:** data-quality
-scoring, OpenLineage, OpenMetadata, DataHub, MCP, AI-agent governance. The
-pipeline is local-execution only: no Kubernetes, Seqera Platform, cloud
-executor, container registry or DSL2 module library.
+**Not yet implemented, and not to be added without being asked:** OpenLineage,
+OpenMetadata, DataHub, MCP, AI-agent governance. The pipeline is
+local-execution only: no Kubernetes, Seqera Platform, cloud executor, container
+registry or DSL2 module library. Data quality has no history, trends, drift
+detection, thresholds, dashboard or database, and no numeric score.
 
 ## Commands
 
@@ -33,7 +34,11 @@ uv run bio-gov demo generate  # write a synthetic study to data/raw/
 # validate generated data against a contract
 uv run bio-gov contract validate contracts/samples.v1.yaml data/raw/BIO-001/samples.csv
 
-# run the contract-gated pipeline (needs Nextflow and a JVM, installed separately)
+# evaluate a whole study for data quality
+uv run bio-gov dq run data/raw/BIO-001
+uv run bio-gov dq run data/raw/BIO-001 --json-out results/BIO-001/quality/dq-report.json
+
+# run the governance-gated pipeline (needs Nextflow and a JVM, installed separately)
 nextflow run pipelines/nextflow/main.nf
 nextflow run pipelines/nextflow/main.nf --study_dir data/raw/BIO-002   # a broken study
 ```
@@ -52,15 +57,19 @@ all four before committing.
 - `src/bio_governance/contracts/` — `models.py` for the contract definition and
   result models, `loader.py` for YAML loading, `validator.py` for applying a
   contract to a CSV. Export new public names from `contracts/__init__.py`.
+- `src/bio_governance/quality/` — `models.py` for the check and report models,
+  `checks.py` for the study-level checks. Export new public names from
+  `quality/__init__.py`.
 - `contracts/` — the contract definitions themselves, as YAML. Committed.
 - `pipelines/nextflow/` — `main.nf` holds the DSL2 workflow, `nextflow.config`
   its parameters and manifest. Nothing else belongs here.
 - `src/bio_governance/cli.py` — the `bio-gov` Typer app. The `demo` sub-app
-  hosts generation commands; the `contract` sub-app hosts validation.
+  hosts generation commands, the `contract` sub-app hosts validation, and the
+  `dq` sub-app hosts quality evaluation.
 - `tests/` — mirrors the source modules. Shared fixtures live in `conftest.py`.
 - `docs/` — `architecture.md` (decisions), `governance-model.md` (meaning),
   `synthetic-data.md` (the generated study), `data-contracts.md` (the contract
-  format and validation).
+  format and validation), `data-quality.md` (the checks and the evidence).
 - `data/` — generated output. Git-ignored; never commit generated data.
 - `results/` — pipeline output. Git-ignored, like `work/` and `.nextflow*`.
 
@@ -105,16 +114,33 @@ all four before committing.
   paths, URIs, connectors or remote storage.
 - **Standard library only for generation.** Do not add pandas or numpy without a
   concrete need.
+- **Contracts and data quality are different layers.** A contract asks whether
+  one file conforms to its declared structure, one row at a time. A quality
+  check asks whether the study is consistent and usable, across files. Do not
+  restate a contract rule as a quality check: if a per-row rule already covers
+  it, the contract owns it.
+- **Quality checks are deterministic and study-local.** They read the four files
+  of one directory and nothing else — no clock, no database, no previous run.
+- **Quality does not import the generator either**, for the same reason the
+  validator does not. `VEHICLE_TREATMENT` and the file names are restated in
+  `quality/checks.py`.
+- **The check vocabulary is closed.** Adding a check means adding a named
+  `QualityCheck` member so a finding stays reportable.
+- **`overall_status` is derived, never stored**, and there is no numeric score.
+  A finding that must not stop a pipeline is a `WARN`.
+- **A quality report is counted, not enumerated, where a defect is repetitive.**
+  One finding saying "24 of 240 measurements are unusable", never one per cell.
 - **The pipeline shells out to `bio-gov`.** A gate process runs
-  `bio-gov contract validate` and lets the exit code decide; it never imports
-  `validate_dataset`. The exit code is the orchestrator-agnostic interface.
-- **The gate is structural.** `CURATE` consumes the samples gate's output
-  channel, which consumes the compounds gate's. Never give a downstream process
-  a path to raw data that bypasses a gate, and never soften
-  `errorStrategy = 'terminate'` — a contract violation is a verdict, not a
-  transient failure.
-- **Processes carry governance in their names.** `CONTRACT_GATE_*` so a run log
-  shows where the decision happened.
+  `bio-gov contract validate` or `bio-gov dq run` and lets the exit code decide;
+  it never imports `validate_dataset` or `evaluate_study`. The exit code is the
+  orchestrator-agnostic interface.
+- **The gates are structural.** `CURATE` consumes `RUN_DATA_QUALITY`'s output
+  channel, which consumes the samples gate's, which consumes the compounds
+  gate's. Never give a downstream process a path to raw data that bypasses a
+  gate, and never soften `errorStrategy = 'terminate'` — a governance failure is
+  a verdict, not a transient failure.
+- **Processes carry governance in their names.** `CONTRACT_GATE_*` and
+  `RUN_DATA_QUALITY`, so a run log shows where the decision happened.
 - **The curated step stays trivial.** It copies files. Do not invent a
   scientific transformation to make the pipeline look substantial.
 - **Nextflow is not a Python dependency.** It is installed separately and CI does
@@ -131,10 +157,19 @@ Generator tests write to `tmp_path` and never leave files in the repository.
 Every bad-data injection gets a test proving it introduces its intended defect,
 and determinism is asserted by comparing bytes across two runs.
 
+Quality tests generate a study and then damage it in one specific way, so each
+test names the check it is about. Several defects trip more than one check —
+that is the honest behaviour — so assert on a named check's status rather than
+only on the report. One test proves the point of the whole layer: a study with
+its vehicle controls deleted passes the samples contract and fails data quality.
+Shared CSV-damaging helpers live in `conftest.py`.
+
 Pipeline tests run Nextflow for real, under `tmp_path`, and skip when Nextflow
 is not on `PATH`; the static assertions about parameters, process names and the
-gate ordering run everywhere. Both the clean and the gated-out case are tested,
-and the failing case asserts that no curated directory is written.
+gate ordering run everywhere. All three outcomes are tested: clean data reaches
+`CURATE`, contract-invalid data stops at the contract gate, and contract-valid
+but low-quality data stops at `RUN_DATA_QUALITY`. Each failing case asserts that
+no curated directory is written.
 
 Contract tests load the real YAML from `contracts/` rather than inline
 definitions, so the shipped contracts are what is under test. Every `--inject-*`

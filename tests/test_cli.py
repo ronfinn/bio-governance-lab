@@ -181,3 +181,78 @@ def test_contract_help_is_listed(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "validate" in result.output
+
+
+def test_dq_help_is_listed() -> None:
+    result = runner.invoke(app, ["dq", "--help"])
+
+    assert result.exit_code == 0
+    assert "run" in result.output
+
+
+def test_dq_run_returns_zero_for_a_clean_study(tmp_path: Path) -> None:
+    study = generated_study(tmp_path)
+
+    result = runner.invoke(app, ["dq", "run", str(study)])
+
+    assert result.exit_code == 0
+    assert "Study: BIO-001" in result.output
+    assert "Data quality: PASS" in result.output
+    for check in (
+        "sample_count_consistency",
+        "vehicle_control_presence",
+        "compound_coverage",
+        "expression_sample_alignment",
+        "expression_completeness",
+        "expression_gene_count",
+    ):
+        assert f"PASS  {check}" in result.output
+
+
+def test_dq_run_returns_one_for_a_failing_study(tmp_path: Path) -> None:
+    study = generated_study(tmp_path, "--samples", "2", "--compounds", "3")
+
+    result = runner.invoke(app, ["dq", "run", str(study)])
+
+    assert result.exit_code == 1
+    assert "Data quality: FAIL" in result.output
+    assert "FAIL  compound_coverage" in result.output
+    assert "CMP-002, CMP-003" in result.output
+
+
+def test_dq_run_writes_the_structured_report(tmp_path: Path) -> None:
+    study = generated_study(tmp_path)
+    report_path = tmp_path / "results" / "BIO-001" / "quality" / "dq-report.json"
+
+    result = runner.invoke(app, ["dq", "run", str(study), "--json-out", str(report_path)])
+
+    assert result.exit_code == 0
+    document = json.loads(report_path.read_text(encoding="utf-8"))
+    assert document["study_id"] == "BIO-001"
+    assert document["overall_status"] == "pass"
+    assert len(document["checks"]) == 6
+    assert str(report_path) in result.output
+
+
+def test_dq_run_writes_the_report_for_a_failing_study_too(tmp_path: Path) -> None:
+    """The evidence is most wanted exactly when the gate refuses to open."""
+    study = generated_study(tmp_path, "--samples", "2", "--compounds", "3")
+    report_path = tmp_path / "dq-report.json"
+
+    result = runner.invoke(app, ["dq", "run", str(study), "--json-out", str(report_path)])
+
+    assert result.exit_code == 1
+    assert json.loads(report_path.read_text(encoding="utf-8"))["overall_status"] == "fail"
+
+
+def test_dq_run_returns_two_for_a_directory_that_is_not_a_study(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["dq", "run", str(tmp_path)])
+
+    assert result.exit_code == 2
+    assert "study.json" in result.output
+
+
+def test_dq_run_rejects_a_missing_directory(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["dq", "run", str(tmp_path / "absent")])
+
+    assert result.exit_code != 0

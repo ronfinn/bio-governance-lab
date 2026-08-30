@@ -2,11 +2,11 @@
 
 ## Scope of this milestone
 
-This repository is at milestone 4: a tested Python foundation, a deterministic
+This repository is at milestone 5: a tested Python foundation, a deterministic
 generator for a small synthetic study, YAML data contracts validated against the
-generated CSVs, and a Nextflow pipeline that runs those contracts as a gate in
-front of curation. No quality score is computed and no external catalogue is
-contacted.
+generated CSVs, study-level data-quality checks over the study as a whole, and a
+Nextflow pipeline that runs both as gates in front of curation. No history is
+kept and no external catalogue is contacted.
 
 Everything that follows is designed to be added *on top of* this model rather
 than to replace it.
@@ -30,6 +30,10 @@ src/bio_governance/
         models.py          DataContract, ColumnContract, Violation, result
         loader.py          YAML -> DataContract, with clear load failures
         validator.py       applying a contract to a CSV file
+    quality/
+        __init__.py        public quality exports
+        models.py          QualityCheck, status, check result, report
+        checks.py          the six study-level checks
 contracts/                 the contract definitions themselves (YAML)
 pipelines/nextflow/
     main.nf                contract-gated curation workflow (DSL2)
@@ -129,21 +133,60 @@ description of the relationship. Anything more — URIs, connectors, a registry 
 look datasets up in — would be inventing an integration surface before there is
 an integration to shape it.
 
-**The pipeline calls the CLI, not the library.** Each gate process runs
-`bio-gov contract validate` as a subprocess rather than importing
-`validate_dataset`. The exit code is the interface — that is what the CLI's `0`,
-`1`, `2` were for — and it is the interface every other orchestrator understands
-too, so the contract gate is not coupled to Nextflow, to Python, or to this
-process model. It also means the gate a reviewer reads in `main.nf` is exactly
-the command they can run by hand.
+**Data quality is a second layer, not more contract rules.** A contract sees one
+file, one row at a time; a quality check sees a study. Deleting the vehicle
+controls from `samples.csv` breaks no contract rule — every remaining row is as
+well-formed as it was — and leaves a study whose treatments have nothing to be
+compared against, whose row count contradicts `study.json`, and whose expression
+matrix measures samples the manifest has forgotten. None of that is visible from
+inside a row. The corollary is a rule the checks follow strictly: a defect a
+per-row contract rule already covers is not re-checked here, because two layers
+enforcing the same thing means neither owns it.
 
-**The gate is enforced by the dataflow, not by a check inside the step.**
-`CURATE` takes its input from `CONTRACT_GATE_SAMPLES`'s output channel, which in
-turn takes its input from `CONTRACT_GATE_COMPOUNDS`. There is no path by which a
-raw file reaches curation without both gates having succeeded first, so the
-guarantee is structural rather than a conditional somebody could remove. The
-processes are named `CONTRACT_GATE_*` for the same reason: the run log should
-show a reader where governance happened.
+**The quality checks do not import the generator either.** `VEHICLE_TREATMENT`
+and the four file names are restated in `quality/checks.py`, and `study.json` is
+read as plain JSON rather than through `StudyMetadata`. The argument is the one
+that kept the contract validator independent: if the thing that wrote the data
+also supplied the expectations, a passing report would say only that the
+generator agrees with itself.
+
+**A quality verdict is a status, not a score.** Three values — PASS, WARN, FAIL
+— and `overall_status` is derived from the checks rather than stored, so a
+report cannot claim a verdict its checks do not support. A number would need
+weights nobody agreed on, would hide which check failed, and could not gate
+anything without a threshold that is itself an ungoverned decision. `WARN`
+exists for a finding that must not stop a pipeline; none of the six checks emits
+one yet, and the alternative — a later non-blocking check choosing between
+silence and failing the gate — is worse than an unused status.
+
+**Repetitive defects are counted, not enumerated.** `expression_completeness`
+reports "24 of 240 measurements are blank or not a finite number" rather than 24
+findings. A matrix has thousands of cells, and the per-row reporting that works
+for a contract would produce a report nobody reads.
+
+**The pipeline calls the CLI, not the library.** Each gate process runs
+`bio-gov contract validate` or `bio-gov dq run` as a subprocess rather than
+importing `validate_dataset` or `evaluate_study`. The exit code is the interface
+— that is what the CLI's `0`, `1`, `2` were for — and it is the interface every
+other orchestrator understands too, so the gates are not coupled to Nextflow, to
+Python, or to this process model. It also means the gate a reviewer reads in
+`main.nf` is exactly the command they can run by hand.
+
+**The gates are enforced by the dataflow, not by a check inside a step.**
+`CURATE` takes its input from `RUN_DATA_QUALITY`'s output channel, which takes
+its input from `CONTRACT_GATE_SAMPLES`, which takes its input from
+`CONTRACT_GATE_COMPOUNDS`. There is no path by which a raw file reaches curation
+without every gate having succeeded first, so the guarantee is structural rather
+than a conditional somebody could remove. Structure is checked before
+consistency because a malformed file cannot meaningfully be assessed for
+consistency. The processes are named `CONTRACT_GATE_*` and `RUN_DATA_QUALITY`
+for the same reason: the run log should show a reader where governance happened.
+
+**The quality report is written before the exit status is decided.** A failing
+study is exactly the one whose evidence somebody wants, so `--json-out` produces
+a file either way. Nextflow will not publish the outputs of a process that
+exited non-zero, so a failed gate's report stays in the work directory and the
+readable form stays in the log — which is where a failure is read from anyway.
 
 **The curation step is deliberately trivial.** `CURATE` copies three files into
 `curated/`. The pipeline exists to demonstrate that governance can stop
@@ -182,9 +225,8 @@ shaped by the first real integration, not guessed at ahead of it.
 
 ## Where this is heading
 
-Later milestones will add data-quality checks, OpenLineage events, and
-catalogue integration with OpenMetadata and DataHub, followed by MCP and
-AI-agent governance. Each of those is expected to consume the
+Later milestones will add OpenLineage events and catalogue integration with
+OpenMetadata and DataHub, followed by MCP and AI-agent governance. Each of those is expected to consume the
 `Asset` model rather than define its own, and to run against the synthetic study
 — including the deliberately broken versions of it.
 
@@ -193,6 +235,10 @@ is a structured object, not printed text, so emitting a quality event or setting
 an `Asset.quality_status` reads the result rather than parsing a report. The CLI
 is only one renderer of it.
 
-The pipeline is the second seam. A lineage milestone has a place to emit run and
+`QualityReport` is the same kind of seam, and the one an `Asset.quality_status`
+should be set from. It is already serialized as JSON evidence beside every run,
+so a catalogue integration reads a file rather than re-deriving a verdict.
+
+The pipeline is the third seam. A lineage milestone has a place to emit run and
 dataset events from, and a catalogue milestone has a producer of curated assets
-to register — both without changing what the gate means.
+to register — both without changing what the gates mean.
