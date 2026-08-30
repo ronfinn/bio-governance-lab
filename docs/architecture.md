@@ -2,9 +2,10 @@
 
 ## Scope of this milestone
 
-This repository is at milestone 1: a clean, tested Python foundation. It holds a
-domain model and a CLI, and nothing else. No data is generated, no pipeline
-runs, and no external catalogue is contacted.
+This repository is at milestone 2: a tested Python foundation plus a
+deterministic generator for a small synthetic study. No pipeline runs, no
+contract is enforced, no quality check executes, and no external catalogue is
+contacted.
 
 Everything that follows is designed to be added *on top of* this model rather
 than to replace it.
@@ -20,7 +21,11 @@ src/bio_governance/
         enums.py           controlled vocabularies
         identifiers.py     AssetIdentifier (bio:// URIs)
         governance.py      Asset, Ownership, Provenance, ContractReference
+    synthetic/
+        __init__.py        public generator exports
+        generator.py       deterministic synthetic study generation
 tests/                     pytest suite
+data/                      generated output (git-ignored)
 docs/                      architecture and governance notes
 .github/workflows/ci.yml   lint, format, type-check, test
 ```
@@ -62,6 +67,25 @@ CI, so a green CI run means the same dependency set a contributor has.
 machine-checkable. Loose typing in the tool making that argument would undercut
 it.
 
+**Generated data is reproducible, not stored.** The synthetic study is a fixture
+for later milestones, and a fixture that drifts is worse than no fixture. The
+generator is a pure function of its arguments — one seeded `random.Random`, a
+fixed consumption order, no clock and no timestamps — so identical inputs give
+identical bytes. That makes the output disposable: `data/` is git-ignored and
+regenerated on demand instead of being committed and going stale.
+
+**Malformed data is generated, never validated here.** The `--inject-*` options
+write specific defects into `samples.csv`. Keeping detection out of the
+generator means the quality milestone has an independent subject to check rather
+than grading its own homework, and `study.json` records which defects were
+injected so that check has an answer key.
+
+**The generator borrows from the domain model without bending it.** It reuses
+`AssetIdentifier` — `study.json` records the `bio://` identity of each file it
+writes — and its own record types (`Compound`, `Sample`, `StudyMetadata`) follow
+the same frozen-Pydantic conventions. `Asset` itself is untouched: describing a
+row of a CSV is not what it is for.
+
 ## Deliberate non-goals for now
 
 No repository or service abstraction layer, no plugin system, no configuration
@@ -70,7 +94,8 @@ shaped by the first real integration, not guessed at ahead of it.
 
 ## Where this is heading
 
-Later milestones will add synthetic data generation, data contracts, quality
-checks, Nextflow orchestration, OpenLineage events, and catalogue integration
-with OpenMetadata and DataHub, followed by MCP and AI-agent governance. Each of
-those is expected to consume the `Asset` model rather than define its own.
+Later milestones will add data contracts, quality checks, Nextflow
+orchestration, OpenLineage events, and catalogue integration with OpenMetadata
+and DataHub, followed by MCP and AI-agent governance. Each of those is expected
+to consume the `Asset` model rather than define its own, and to run against the
+synthetic study — including the deliberately broken versions of it.
