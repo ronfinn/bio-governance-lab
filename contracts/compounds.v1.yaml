@@ -1,0 +1,40 @@
+# Contract for the compound registry of a generated synthetic study.
+#
+# Applies to <study>/compounds.csv. Validate with:
+#   uv run bio-gov contract validate contracts/compounds.v1.yaml \
+#     data/raw/BIO-001/compounds.csv
+#
+# This contract checks that the registry is a usable key table: every compound
+# is present, identified and named. It makes no claim about the chemistry, which
+# is invented in any case.
+
+contract_id: bio.compounds
+version: 1.0.0
+asset: bio://BIO-001/raw/compounds
+description: >-
+  The study's registry of test articles. Every compound_id referenced by
+  samples.csv must appear here.
+
+extra_columns: forbid
+
+columns:
+  - name: compound_id
+    type: string
+    description: Registry key, e.g. CMP-001. The target of the samples foreign key.
+    required: true
+    unique: true
+    pattern: "^CMP-\\d{3,}$"
+
+  - name: compound_name
+    type: string
+    description: Display name of the test article.
+    required: true
+    unique: true
+
+  - name: mechanism_class
+    type: string
+    description: >-
+      How the compound is said to act. Required and non-blank; the contract does
+      not police the vocabulary, because scientific validity is not something a
+      CSV contract can assert.
+    required: true
