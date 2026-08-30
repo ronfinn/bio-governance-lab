@@ -2,10 +2,10 @@
 
 ## Scope of this milestone
 
-This repository is at milestone 2: a tested Python foundation plus a
-deterministic generator for a small synthetic study. No pipeline runs, no
-contract is enforced, no quality check executes, and no external catalogue is
-contacted.
+This repository is at milestone 3: a tested Python foundation, a deterministic
+generator for a small synthetic study, and YAML data contracts validated against
+the generated CSVs. No pipeline runs, no quality score is computed, and no
+external catalogue is contacted.
 
 Everything that follows is designed to be added *on top of* this model rather
 than to replace it.
@@ -24,6 +24,12 @@ src/bio_governance/
     synthetic/
         __init__.py        public generator exports
         generator.py       deterministic synthetic study generation
+    contracts/
+        __init__.py        public contract exports
+        models.py          DataContract, ColumnContract, Violation, result
+        loader.py          YAML -> DataContract, with clear load failures
+        validator.py       applying a contract to a CSV file
+contracts/                 the contract definitions themselves (YAML)
 tests/                     pytest suite
 data/                      generated output (git-ignored)
 docs/                      architecture and governance notes
@@ -80,6 +86,49 @@ generator means the quality milestone has an independent subject to check rather
 than grading its own homework, and `study.json` records which defects were
 injected so that check has an answer key.
 
+**Contracts are data, not code.** A contract lives in `contracts/*.yaml`, not
+in a Python module. That is the whole argument of governance-as-code: the
+agreement about what a dataset must contain is a reviewable, diffable artefact
+that a non-engineer can read in a pull request, and the validator is a generic
+thing that applies it. Putting the rules in Python would make every contract
+change a code change.
+
+**The contract vocabulary is closed and small.** Columns, types, required,
+unique, minimum, allowed values, pattern, foreign key. No expression language,
+no inheritance, no plugins. The constraint is deliberate: every rule has to be
+reportable as a *named* violation — `minimum`, `foreign_key` — because a
+governance report that says "an expression returned false" tells a data steward
+nothing. An expression language would also be a second, untested programming
+language living inside YAML.
+
+**The validator does not import the generator's models.** `Sample` and
+`Compound` describe what the generator writes; the contract describes what the
+file must contain. If validation reused the generator's models, a passing run
+would prove only that the generator is self-consistent — the generator would be
+grading its own homework, which is exactly what milestone 2 avoided by keeping
+detection out of it. The two descriptions agreeing is the finding.
+
+**Validation is binary, and reports everything.** A contract result is a boolean
+plus a list of violations; there is no score, severity or threshold. Structural
+conformance has a yes/no answer, and something with a yes/no answer can gate a
+pipeline. Grading — drift, completeness trends, plausibility — genuinely needs
+thresholds and history, so it belongs to the quality milestone that also has
+somewhere to record a series of results. Separately, every rule runs against
+every row: a report naming one of four defects would send a steward round the
+loop four times.
+
+**Foreign keys resolve to a sibling file, and nothing else.** A `references`
+block names a bare file name and a column, resolved next to the dataset being
+validated. A generated study is a directory of files, so that is the honest
+description of the relationship. Anything more — URIs, connectors, a registry to
+look datasets up in — would be inventing an integration surface before there is
+an integration to shape it.
+
+**PyYAML, and nothing else new.** A YAML parser is the one thing reading a
+contract requires that the standard library does not provide. Reading CSV,
+matching patterns and comparing numbers it does provide, so no dataframe or
+validation framework was added to do them.
+
 **The generator borrows from the domain model without bending it.** It reuses
 `AssetIdentifier` — `study.json` records the `bio://` identity of each file it
 writes — and its own record types (`Compound`, `Sample`, `StudyMetadata`) follow
@@ -94,8 +143,13 @@ shaped by the first real integration, not guessed at ahead of it.
 
 ## Where this is heading
 
-Later milestones will add data contracts, quality checks, Nextflow
-orchestration, OpenLineage events, and catalogue integration with OpenMetadata
-and DataHub, followed by MCP and AI-agent governance. Each of those is expected
-to consume the `Asset` model rather than define its own, and to run against the
-synthetic study — including the deliberately broken versions of it.
+Later milestones will add data-quality checks, Nextflow orchestration,
+OpenLineage events, and catalogue integration with OpenMetadata and DataHub,
+followed by MCP and AI-agent governance. Each of those is expected to consume the
+`Asset` model rather than define its own, and to run against the synthetic study
+— including the deliberately broken versions of it.
+
+`ContractValidationResult` is the seam those milestones are expected to use. It
+is a structured object, not printed text, so emitting a quality event or setting
+an `Asset.quality_status` reads the result rather than parsing a report. The CLI
+is only one renderer of it.

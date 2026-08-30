@@ -92,3 +92,92 @@ def test_demo_generate_rejects_a_malformed_study_id(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     assert not tmp_path.joinpath("nope").exists()
+
+
+CONTRACTS = Path(__file__).resolve().parent.parent / "contracts"
+
+
+def generated_study(tmp_path: Path, *injections: str) -> Path:
+    result = runner.invoke(app, ["demo", "generate", "--output", str(tmp_path), *injections])
+    assert result.exit_code == 0
+    return tmp_path / "BIO-001"
+
+
+def test_contract_validate_returns_zero_for_clean_samples(tmp_path: Path) -> None:
+    study = generated_study(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["contract", "validate", str(CONTRACTS / "samples.v1.yaml"), str(study / "samples.csv")],
+    )
+
+    assert result.exit_code == 0
+    assert "Contract: bio.samples@1.0.0" in result.output
+    assert "PASS" in result.output
+    assert "Rows checked: 20" in result.output
+
+
+def test_contract_validate_returns_zero_for_clean_compounds(tmp_path: Path) -> None:
+    study = generated_study(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "contract",
+            "validate",
+            str(CONTRACTS / "compounds.v1.yaml"),
+            str(study / "compounds.csv"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "bio.compounds@1.0.0" in result.output
+    assert "PASS" in result.output
+
+
+def test_contract_validate_returns_non_zero_for_invalid_data(tmp_path: Path) -> None:
+    study = generated_study(
+        tmp_path,
+        "--inject-missing-sample-id",
+        "--inject-invalid-dose",
+        "--inject-duplicate-sample",
+        "--inject-unknown-compound",
+    )
+
+    result = runner.invoke(
+        app,
+        ["contract", "validate", str(CONTRACTS / "samples.v1.yaml"), str(study / "samples.csv")],
+    )
+
+    assert result.exit_code == 1
+    assert "FAIL" in result.output
+    assert "4 violations" in result.output
+    for rule in ("required", "minimum", "unique", "foreign_key"):
+        assert rule in result.output
+
+
+def test_contract_validate_reports_a_malformed_contract(tmp_path: Path) -> None:
+    study = generated_study(tmp_path)
+    contract = tmp_path / "broken.yaml"
+    contract.write_text("contract_id: bio.samples\n  version: [1\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["contract", "validate", str(contract), str(study / "samples.csv")])
+
+    assert result.exit_code == 2
+    assert "not valid YAML" in result.output
+
+
+def test_contract_validate_rejects_a_missing_dataset(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["contract", "validate", str(CONTRACTS / "samples.v1.yaml"), str(tmp_path / "absent.csv")],
+    )
+
+    assert result.exit_code != 0
+
+
+def test_contract_help_is_listed(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["contract", "--help"])
+
+    assert result.exit_code == 0
+    assert "validate" in result.output
