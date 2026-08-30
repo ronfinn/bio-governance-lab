@@ -1,0 +1,75 @@
+# Contract for the sample manifest of a generated synthetic study.
+#
+# Applies to <study>/samples.csv, one row per treated well. Validate with:
+#   uv run bio-gov contract validate contracts/samples.v1.yaml \
+#     data/raw/BIO-001/samples.csv
+#
+# This contract is written independently of the generator's Python models. It is
+# what the file is expected to look like, not a restatement of what the
+# generator happens to produce.
+
+contract_id: bio.samples
+version: 1.0.0
+asset: bio://BIO-001/raw/samples
+description: >-
+  One row per well: which study it belongs to, what it was treated with, at what
+  dose, in what tissue, and which replicate it is.
+
+# The header must be exactly the declared columns. A new field arriving
+# unannounced is a contract change, not a detail.
+extra_columns: forbid
+
+columns:
+  - name: sample_id
+    type: string
+    description: Study-scoped identity of the well, e.g. BIO-001-S001.
+    required: true
+    unique: true
+    pattern: "^[A-Z0-9]+(?:-[A-Z0-9]+)*-S\\d{3,}$"
+
+  - name: study_id
+    type: string
+    description: The study this sample belongs to, e.g. BIO-001.
+    required: true
+    pattern: "^[A-Z0-9]+(?:-[A-Z0-9]+)*$"
+
+  - name: compound_id
+    type: string
+    description: >-
+      The test article applied to the well. Blank for vehicle controls, which
+      are treated with the solvent alone and so reference no compound. A
+      non-blank value must exist in the study's compound registry.
+    required: false
+    pattern: "^CMP-\\d{3,}$"
+    references:
+      file: compounds.csv
+      column: compound_id
+
+  - name: treatment
+    type: string
+    description: Human-readable condition label; 'vehicle' for controls.
+    required: true
+
+  - name: dose
+    type: number
+    description: Applied dose. Zero for vehicle controls; never negative.
+    required: true
+    minimum: 0
+
+  - name: dose_unit
+    type: string
+    description: Unit the dose is expressed in.
+    required: true
+    allowed_values: [uM]
+
+  - name: tissue
+    type: string
+    description: Tissue of origin of the cells in the well.
+    required: true
+    allowed_values: [liver, kidney, lung, heart]
+
+  - name: replicate
+    type: integer
+    description: Replicate number within the condition, counting from 1.
+    required: true
+    minimum: 1

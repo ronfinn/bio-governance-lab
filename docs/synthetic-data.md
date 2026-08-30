@@ -1,9 +1,9 @@
 # Synthetic data
 
 Milestone 2 adds a generator for a small, deterministic, entirely invented
-life-sciences study. It exists so that later milestones — data contracts,
-quality checks, lineage, catalogue integration — have something concrete to run
-against, including data that is deliberately wrong.
+life-sciences study. It exists so that the milestones built on it — data
+contracts, quality checks, lineage, catalogue integration — have something
+concrete to run against, including data that is deliberately wrong.
 
 Nothing in this repository is derived from real patients, subjects, samples or
 proprietary compounds, and nothing ever will be.
@@ -148,15 +148,16 @@ Notes on the design:
   dangling reference, not a malformed value, so a referential-integrity check
   and a format check cannot both take credit for it.
 
-**The generator does not validate its own output.** Detecting these defects is
-the point of the next milestone; producing them cheaply and repeatably is the
-point of this one.
+**The generator does not validate its own output.** Producing these defects
+cheaply and repeatably is the point of this milestone; detecting them is the
+point of the [data contracts](data-contracts.md) that milestone 3 added, which
+describe the files independently and report all four in one pass.
 
 ## Intentionally deferred
 
-Still not implemented, and not to be added without being asked: data contracts,
-data-quality validation, Nextflow orchestration, OpenLineage events,
-OpenMetadata and DataHub integration, MCP, and AI-agent governance.
+Still not implemented, and not to be added without being asked: data-quality
+scoring, Nextflow orchestration, OpenLineage events, OpenMetadata and DataHub
+integration, MCP, and AI-agent governance.
 
 Also deliberately out of scope *within* the generator: biologically realistic
 expression, batch or plate effects, missing-value patterns beyond the injections
