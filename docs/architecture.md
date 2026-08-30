@@ -2,10 +2,11 @@
 
 ## Scope of this milestone
 
-This repository is at milestone 3: a tested Python foundation, a deterministic
-generator for a small synthetic study, and YAML data contracts validated against
-the generated CSVs. No pipeline runs, no quality score is computed, and no
-external catalogue is contacted.
+This repository is at milestone 4: a tested Python foundation, a deterministic
+generator for a small synthetic study, YAML data contracts validated against the
+generated CSVs, and a Nextflow pipeline that runs those contracts as a gate in
+front of curation. No quality score is computed and no external catalogue is
+contacted.
 
 Everything that follows is designed to be added *on top of* this model rather
 than to replace it.
@@ -30,8 +31,12 @@ src/bio_governance/
         loader.py          YAML -> DataContract, with clear load failures
         validator.py       applying a contract to a CSV file
 contracts/                 the contract definitions themselves (YAML)
+pipelines/nextflow/
+    main.nf                contract-gated curation workflow (DSL2)
+    nextflow.config        parameters, manifest, error strategy
 tests/                     pytest suite
 data/                      generated output (git-ignored)
+results/                   pipeline output (git-ignored)
 docs/                      architecture and governance notes
 .github/workflows/ci.yml   lint, format, type-check, test
 ```
@@ -124,6 +129,40 @@ description of the relationship. Anything more — URIs, connectors, a registry 
 look datasets up in — would be inventing an integration surface before there is
 an integration to shape it.
 
+**The pipeline calls the CLI, not the library.** Each gate process runs
+`bio-gov contract validate` as a subprocess rather than importing
+`validate_dataset`. The exit code is the interface — that is what the CLI's `0`,
+`1`, `2` were for — and it is the interface every other orchestrator understands
+too, so the contract gate is not coupled to Nextflow, to Python, or to this
+process model. It also means the gate a reviewer reads in `main.nf` is exactly
+the command they can run by hand.
+
+**The gate is enforced by the dataflow, not by a check inside the step.**
+`CURATE` takes its input from `CONTRACT_GATE_SAMPLES`'s output channel, which in
+turn takes its input from `CONTRACT_GATE_COMPOUNDS`. There is no path by which a
+raw file reaches curation without both gates having succeeded first, so the
+guarantee is structural rather than a conditional somebody could remove. The
+processes are named `CONTRACT_GATE_*` for the same reason: the run log should
+show a reader where governance happened.
+
+**The curation step is deliberately trivial.** `CURATE` copies three files into
+`curated/`. The pipeline exists to demonstrate that governance can stop
+processing, and a plausible-looking scientific transformation would only add
+code that nobody can check and distract from the one claim being made. Nothing
+about the gate changes when a real step replaces it.
+
+**Local execution, and no executor configuration.** `nextflow.config` sets
+parameters, a manifest and `errorStrategy = 'terminate'`, and nothing else. A
+retry strategy would be actively wrong here — a contract violation is a verdict,
+not a transient failure — and Kubernetes, cloud executors and container
+registries would be infrastructure choices made before there is a workload to
+shape them.
+
+**Nextflow stays outside the Python environment.** It is a JVM tool installed
+separately, so it is not a project dependency and CI does not install it. The
+pipeline tests run it for real when it is on `PATH` and skip when it is not;
+the static assertions about parameters and process names run everywhere.
+
 **PyYAML, and nothing else new.** A YAML parser is the one thing reading a
 contract requires that the standard library does not provide. Reading CSV,
 matching patterns and comparing numbers it does provide, so no dataframe or
@@ -143,9 +182,9 @@ shaped by the first real integration, not guessed at ahead of it.
 
 ## Where this is heading
 
-Later milestones will add data-quality checks, Nextflow orchestration,
-OpenLineage events, and catalogue integration with OpenMetadata and DataHub,
-followed by MCP and AI-agent governance. Each of those is expected to consume the
+Later milestones will add data-quality checks, OpenLineage events, and
+catalogue integration with OpenMetadata and DataHub, followed by MCP and
+AI-agent governance. Each of those is expected to consume the
 `Asset` model rather than define its own, and to run against the synthetic study
 — including the deliberately broken versions of it.
 
@@ -153,3 +192,7 @@ followed by MCP and AI-agent governance. Each of those is expected to consume th
 is a structured object, not printed text, so emitting a quality event or setting
 an `Asset.quality_status` reads the result rather than parsing a report. The CLI
 is only one renderer of it.
+
+The pipeline is the second seam. A lineage milestone has a place to emit run and
+dataset events from, and a catalogue milestone has a producer of curated assets
+to register — both without changing what the gate means.
