@@ -6,11 +6,11 @@ This repository is a public portfolio project exploring how data governance —
 ownership, classification, lineage, contracts and quality — can be expressed as
 typed, tested, version-controlled code rather than as documents in a wiki.
 
-> **Status: milestone 4 — pipeline.** This repository contains the core domain
-> model, a deterministic generator for a small synthetic study, YAML data
-> contracts that validate the generated CSVs, and a Nextflow pipeline that puts
-> those contracts in front of curation as a gate. There is no data-quality
-> scoring or catalogue integration yet. See [Deferred work](#deferred-work).
+> **Status: milestone 5 — data quality.** This repository contains the core
+> domain model, a deterministic generator for a small synthetic study, YAML data
+> contracts over the generated CSVs, study-level data-quality checks, and a
+> Nextflow pipeline that puts both in front of curation as gates. There is no
+> catalogue or lineage integration yet. See [Deferred work](#deferred-work).
 
 ## What is here today
 
@@ -21,8 +21,10 @@ typed, tested, version-controlled code rather than as documents in a wiki.
   optional bad-data injection.
 - Small YAML data contracts over the generated CSVs, and a validator that
   reports every violation rather than the first.
+- Six deterministic data-quality checks over the study as a whole, reported as
+  PASS/WARN/FAIL with a JSON evidence file.
 - A [Nextflow](https://www.nextflow.io/) pipeline in which raw data reaches the
-  curated directory only by passing the contract gate.
+  curated directory only by passing both gates.
 - A [Typer](https://typer.tiangolo.com/) CLI, `bio-gov`.
 - A full test suite, lint, format and type checks, wired into GitHub Actions.
 
@@ -35,6 +37,7 @@ uv sync
 uv run bio-gov --help
 uv run bio-gov demo generate
 uv run bio-gov contract validate contracts/samples.v1.yaml data/raw/BIO-001/samples.csv
+uv run bio-gov dq run data/raw/BIO-001
 nextflow run pipelines/nextflow/main.nf
 ```
 
@@ -108,20 +111,74 @@ See [Data contracts](docs/data-contracts.md) for the YAML format, how foreign
 keys resolve, and why contract validation is not the same thing as a
 data-quality check.
 
+## Data quality
+
+A contract asks whether one file conforms to its declared structure. Data
+quality asks a different question: whether the study as a whole is consistent
+and usable. Six checks compare the four files against each other and against
+what `study.json` declares.
+
+```bash
+uv run bio-gov dq run data/raw/BIO-001
+```
+
+```
+Study: BIO-001
+Data quality: PASS
+
+PASS  sample_count_consistency
+PASS  vehicle_control_presence
+PASS  compound_coverage
+PASS  expression_sample_alignment
+PASS  expression_completeness
+PASS  expression_gene_count
+```
+
+The two layers really are different. Delete every vehicle-control row from
+`samples.csv` and the samples contract still passes — every remaining row is
+well-formed — but the study is unusable:
+
+```
+Study: BIO-003
+Data quality: FAIL
+
+FAIL  sample_count_consistency     samples.csv holds 18 rows but study.json declares 20
+FAIL  vehicle_control_presence     no sample carries the 'vehicle' control treatment
+PASS  compound_coverage
+FAIL  expression_sample_alignment  2 not in samples.csv (BIO-003-S001, BIO-003-S011)
+PASS  expression_completeness
+PASS  expression_gene_count
+```
+
+Exit status is `0` for PASS or WARN, `1` for FAIL, and `2` if the study could
+not be read. `--json-out` writes the structured report, including for a failing
+study — that is the run whose evidence somebody wants:
+
+```bash
+uv run bio-gov dq run data/raw/BIO-001 --json-out results/BIO-001/quality/dq-report.json
+```
+
+There is no numeric score, no history and no drift detection. See
+[Data quality](docs/data-quality.md) for the six checks and what each one sees
+that a contract cannot.
+
 ## The pipeline
 
 `pipelines/nextflow/` is a small DSL2 workflow whose only argument is that
 governance can gate processing:
 
 ```
-data/raw/<STUDY>/  ->  CONTRACT_GATE_COMPOUNDS  ->  CONTRACT_GATE_SAMPLES  ->  CURATE
+data/raw/<STUDY>/
+  -> CONTRACT_GATE_COMPOUNDS -> CONTRACT_GATE_SAMPLES -> RUN_DATA_QUALITY -> CURATE
                                                                               |
                                                             results/<STUDY>/curated/
 ```
 
-Each gate runs `bio-gov contract validate`. `CURATE` consumes the samples gate's
-output channel and nothing else, so it cannot start until both contracts pass —
-and `bio-gov` exits non-zero on a violation, which terminates the run.
+Structure is checked first — a malformed file cannot meaningfully be assessed
+for consistency — then the study as a whole. Each process consumes the previous
+one's output channel and nothing else, so `CURATE` cannot start until both
+contracts and all six checks have passed, and `bio-gov` exits non-zero on a
+failure, which terminates the run.
 
 ```bash
 uv run bio-gov demo generate --study BIO-001
@@ -129,14 +186,15 @@ nextflow run pipelines/nextflow/main.nf
 ```
 
 ```
-[6c/285aa1] Submitted process > CONTRACT_GATE_COMPOUNDS (BIO-001)
-[b1/cc82f2] Submitted process > CONTRACT_GATE_SAMPLES (BIO-001)
-[71/6979a2] Submitted process > CURATE (BIO-001)
+[8e/0b21cd] Submitted process > CONTRACT_GATE_COMPOUNDS (BIO-001)
+[40/47536f] Submitted process > CONTRACT_GATE_SAMPLES (BIO-001)
+[ed/3d5e9c] Submitted process > RUN_DATA_QUALITY (BIO-001)
+[45/06ad48] Submitted process > CURATE (BIO-001)
 ```
 
-`results/BIO-001/` then holds `curated/{samples,compounds,expression}.csv` and
-the `contracts/*.contract.txt` reports the gates produced. Break the study and
-the gate stops it:
+`results/BIO-001/` then holds `curated/{samples,compounds,expression}.csv`, the
+`contracts/*.contract.txt` reports and `quality/dq-report.json`. Break the study
+and the gate stops it:
 
 ```bash
 uv run bio-gov demo generate --study BIO-002 --inject-invalid-dose --inject-unknown-compound
@@ -155,8 +213,20 @@ ERROR ~ Error executing process > 'CONTRACT_GATE_SAMPLES (BIO-002)'
   row 5  compound_id  foreign_key  CMP-000 not found in compounds.csv column 'compound_id'
 ```
 
-Nextflow exits non-zero, `CURATE` is never submitted, and no
-`results/BIO-002/curated/` directory is written.
+Nextflow exits non-zero, `RUN_DATA_QUALITY` and `CURATE` are never submitted,
+and no `results/BIO-002/curated/` directory is written.
+
+Data that satisfies every contract can still be stopped, one process later. Take
+a clean study, delete its vehicle-control rows, and both contract gates pass
+before `RUN_DATA_QUALITY` refuses it:
+
+```
+[28/bb9d93] Submitted process > CONTRACT_GATE_SAMPLES (BIO-003)
+[48/572e3a] Submitted process > RUN_DATA_QUALITY (BIO-003)
+ERROR ~ Error executing process > 'RUN_DATA_QUALITY (BIO-003)'
+  Data quality: FAIL
+  FAIL  vehicle_control_presence     no sample carries the 'vehicle' control treatment
+```
 
 | Parameter | Default |
 | --- | --- |
@@ -240,17 +310,20 @@ Nextflow checks its behaviour.
   and bad-data injection.
 - [Data contracts](docs/data-contracts.md) — the YAML format, the two contracts,
   validation and exit codes.
+- [Data quality](docs/data-quality.md) — contracts versus quality, the six
+  checks, PASS/WARN/FAIL and the JSON evidence.
 
 ## Deferred work
 
-Deliberately **not** implemented in this milestone: data-quality scoring,
-OpenLineage, OpenMetadata, DataHub, MCP and AI-agent governance. Each will land
-as its own milestone on top of this foundation. The pipeline is local-execution
-only — no Kubernetes, no cloud executor, no container registry.
+Deliberately **not** implemented in this milestone: OpenLineage, OpenMetadata,
+DataHub, MCP and AI-agent governance. Each will land as its own milestone on top
+of this foundation. The pipeline is local-execution only — no Kubernetes, no
+cloud executor, no container registry.
 
-Contract validation is deliberately binary and structural. Grading a dataset —
-drift, completeness trends, severity, thresholds — is a separate concern and
-arrives with the milestone that has somewhere to record the results.
+Data quality here is a single run's evidence and a gate that acts on it. There
+is no numeric score, no stored history, no drift detection and no dashboard:
+those need somewhere to record a series of results and a reason to compare them,
+which arrives with catalogue and lineage integration.
 
 ## Licence
 
