@@ -16,6 +16,9 @@ venv/
 .coverage
 htmlcov/
 
+# Generated demonstration data (regenerate with: uv run bio-gov demo generate)
+data/
+
 # Editors / OS
 .DS_Store
 .idea/
