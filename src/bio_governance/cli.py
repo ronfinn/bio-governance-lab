@@ -53,6 +53,7 @@ from bio_governance.synthetic import (
 )
 
 DEFAULT_OUTPUT_ROOT = Path("data/raw")
+DEFAULT_RESULTS_ROOT = Path("results")
 
 #: Exit status for a dataset that breaks its contract, kept distinct from the
 #: status used when the contract or dataset could not be read at all.
@@ -107,6 +108,13 @@ catalog_app = typer.Typer(
 )
 app.add_typer(catalog_app, name="catalog")
 
+mcp_app = typer.Typer(
+    name="mcp",
+    help="Serve the governance evidence over the Model Context Protocol.",
+    no_args_is_help=True,
+)
+app.add_typer(mcp_app, name="mcp")
+
 openmetadata_app = typer.Typer(
     name="openmetadata",
     help="Publish to a local OpenMetadata instance.",
@@ -147,6 +155,7 @@ def info() -> None:
     typer.echo("OpenLineage provenance events for a curation run: 'bio-gov lineage emit'.")
     typer.echo("Deterministic governance decisions: 'bio-gov governance evaluate'.")
     typer.echo("Publication to a local OpenMetadata: 'bio-gov catalog openmetadata publish'.")
+    typer.echo("Read-only MCP access to that evidence: 'bio-gov mcp serve'.")
 
 
 @demo_app.command("generate")
@@ -664,6 +673,38 @@ def _downstream_names(graph: dict[str, Any]) -> list[str]:
         for edge in graph.get("downstreamEdges", [])
         if isinstance(edge, dict) and (root is None or str(edge.get("fromEntity")) == root)
     )
+
+
+@mcp_app.command("serve")
+def mcp_serve(
+    results_root: Annotated[
+        Path,
+        typer.Option(
+            "--results-root",
+            exists=True,
+            file_okay=False,
+            help="Directory the governed studies are read from.",
+        ),
+    ] = DEFAULT_RESULTS_ROOT,
+) -> None:
+    """Serve the governance evidence to an MCP client over stdio.
+
+    Runs until the client disconnects, speaking the Model Context Protocol on
+    stdin and stdout. Six read-only tools and two resources expose the studies
+    under --results-root: the governance decision, the evidence behind it, and
+    which checks stand between a study and READY.
+
+    Nothing served here can be written to. The decision is computed by
+    'bio-gov governance evaluate' from files on disk, and an MCP client can read
+    and explain it but has no tool that recomputes, overrides or approves it.
+    """
+    # Imported here rather than at module scope: the MCP SDK costs about a
+    # second to import, and every other bio-gov command — including the six the
+    # pipeline shells out to on every run — would pay it for nothing.
+    from bio_governance.mcp import build_server
+
+    typer.echo(f"bio-gov MCP server on stdio, serving {results_root}", err=True)
+    build_server(results_root).run(transport="stdio")
 
 
 if __name__ == "__main__":  # pragma: no cover

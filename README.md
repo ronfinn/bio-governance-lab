@@ -6,13 +6,15 @@ This repository is a public portfolio project exploring how data governance —
 ownership, classification, lineage, contracts and quality — can be expressed as
 typed, tested, version-controlled code rather than as documents in a wiki.
 
-> **Status: milestone 8 — governance evaluation.** This repository contains the
-> core domain model, a deterministic generator for a small synthetic study, YAML
-> data contracts over the generated CSVs, study-level data-quality checks, a
-> Nextflow pipeline that puts both in front of curation as gates, OpenLineage
-> events recording what a governed run produced, publication of those governed
-> assets into a local OpenMetadata instance, and one deterministic
-> READY/REVIEW/BLOCKED decision derived from all of that evidence. See
+> **Status: milestone 9 — read-only MCP governance server.** This repository
+> contains the core domain model, a deterministic generator for a small
+> synthetic study, YAML data contracts over the generated CSVs, study-level
+> data-quality checks, a Nextflow pipeline that puts both in front of curation
+> as gates, OpenLineage events recording what a governed run produced,
+> publication of those governed assets into a local OpenMetadata instance, one
+> deterministic READY/REVIEW/BLOCKED decision derived from all of that evidence,
+> and a Model Context Protocol server that lets an AI assistant read that
+> decision without any way to change it. See
 > [Deferred work](#deferred-work).
 
 ## What is here today
@@ -34,6 +36,9 @@ typed, tested, version-controlled code rather than as documents in a wiki.
   them, into a local [OpenMetadata](https://open-metadata.org) instance.
 - One deterministic governance decision — READY, REVIEW or BLOCKED — derived
   from five checks over that evidence. Code decides; a model may only explain.
+- A read-only [MCP](https://modelcontextprotocol.io) server exposing that
+  evidence to an AI assistant over stdio: six tools, two resources, and no way
+  to write, recompute or override a decision.
 - A [Typer](https://typer.tiangolo.com/) CLI, `bio-gov`.
 - A full test suite, lint, format and type checks, wired into GitHub Actions.
 
@@ -50,6 +55,7 @@ uv run bio-gov dq run data/raw/BIO-001
 nextflow run pipelines/nextflow/main.nf
 cat results/BIO-001/lineage/openlineage.jsonl
 uv run bio-gov governance evaluate results/BIO-001
+uv run bio-gov mcp serve
 ```
 
 With a local OpenMetadata running (see
@@ -459,6 +465,79 @@ them yet, and a check that reads nothing always passes.
 
 See [Governance evaluation](docs/governance-evaluation.md).
 
+## The MCP server
+
+The decision exists. This milestone lets an AI assistant *read* it, over the
+[Model Context Protocol](https://modelcontextprotocol.io), and gives it no way
+to do anything else.
+
+```bash
+uv run bio-gov mcp serve
+uv run bio-gov mcp serve --results-root results
+```
+
+```
+Nextflow
+   ↓
+evidence files
+   ↓
+deterministic governance engine
+   ↓
+MCP server  (read-only)
+   ↓
+MCP host / AI assistant
+```
+
+Every arrow points down. Six tools, all annotated `readOnlyHint`, all confined
+to the results root:
+
+| Tool | Returns |
+| --- | --- |
+| `list_studies` | Every governed study under the results root, with its decision |
+| `get_governance_report` | The `GovernanceReport`: the decision and its five checks |
+| `get_quality_report` | The `QualityReport`: six checks and an overall status |
+| `get_contract_results` | Both `ContractValidationResult`s, samples and compounds |
+| `get_lineage_summary` | The curation run's identity and its `bio://` datasets |
+| `why_not_ready` | Which checks stand between the study and `READY` |
+
+…and two resources, because a report is also a document worth addressing:
+
+```
+governance://studies/{study_id}/report
+quality://studies/{study_id}/report
+```
+
+There is no tool here that computes a decision, overrides one, approves an
+asset, edits a report, publishes to a catalogue or writes a file. But the
+guarantee does not rest on the tool list, which is only a promise about what was
+built — it rests on `GovernanceReport.decision` being a computed field.
+`get_governance_report` deserializes the evidence into that model, so the
+`"decision"` a JSON file carries is never read. Edit `governance-report.json` by
+hand to claim `READY` while a check reads `fail`, and the MCP server still
+answers `BLOCKED`.
+
+`why_not_ready` is the tool that most looks like an explanation and most
+carefully is not one. It calls no model and invents no finding; it partitions
+the report's own checks by the statuses they already carry:
+
+```json
+{
+  "decision": "blocked",
+  "summary": "BIO-001 is BLOCKED: 2 checks (curated_outputs, lineage_evidence) failed.",
+  "blocking": [{"check_id": "curated_outputs", "status": "fail", "message": "..."}],
+  "review": []
+}
+```
+
+A study identifier arrives from outside, so it is validated as an
+`AssetIdentifier` domain before it is joined to a path — `../etc`, `/etc/passwd`
+and `BIO-001/../../data` are all refused by the identifier convention rather
+than by a string filter — and the resolved path is required to still be inside
+the results root. There is no `read_file` tool: the server names every file it
+opens, and a client chooses a study, never a path.
+
+See [The MCP server](docs/mcp-server.md).
+
 ## The domain model
 
 ```python
@@ -538,15 +617,17 @@ Nextflow checks its behaviour.
   `bio://`-to-FQN mapping, authentication, idempotence and lineage.
 - [Governance evaluation](docs/governance-evaluation.md) — why code decides and
   AI only explains, READY/REVIEW/BLOCKED, the five checks and the exit codes.
+- [The MCP server](docs/mcp-server.md) — the read-only boundary, the six tools
+  and two resources, stdio, the Inspector and results-root confinement.
 - [Local OpenMetadata](infra/openmetadata/README.md) — starting and stopping the
   official Docker quickstart, and obtaining a token.
 
 ## Deferred work
 
-Deliberately **not** implemented in this milestone: DataHub, Marquez, MCP and
-AI-agent governance. Each will land as its own milestone on top of this
-foundation. The pipeline is local-execution only — no Kubernetes, no cloud
-executor, no container registry.
+Deliberately **not** implemented in this milestone: DataHub, Marquez, and
+AI-agent governance in the sense of an agent that *acts*. Each will land as its
+own milestone on top of this foundation. The pipeline is local-execution only —
+no Kubernetes, no cloud executor, no container registry.
 
 Data quality here is a single run's evidence and a gate that acts on it. There
 is no numeric score, no stored history, no drift detection and no dashboard:
@@ -570,6 +651,13 @@ There is no Rego, no YAML policy language, no numeric score, no approval
 workflow and no stored history of decisions. Ownership, classification,
 retention, access control and catalogue availability become governance checks
 when this project has real evidence for them, and not before.
+
+The MCP server is read-only and local. There is no HTTP or SSE transport, no
+authentication, no OAuth and no container; there are no prompts, and no
+catalogue search. There are no write tools of any kind, and there will not be
+ones that mutate governance state: if a later milestone lets an assistant
+*request* a re-run or a review, that is a request a person or a deterministic
+process acts on, not a report an assistant edits.
 
 ## Licence
 

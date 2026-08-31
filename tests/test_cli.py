@@ -373,3 +373,24 @@ def test_governance_evaluate_returns_two_for_a_directory_that_is_not_a_study(
 
     assert result.exit_code == 2
     assert "not named for a study" in result.output
+
+
+def test_mcp_help_is_listed() -> None:
+    result = runner.invoke(app, ["mcp", "--help"])
+
+    assert result.exit_code == 0
+    assert "Model Context Protocol" in result.output
+
+
+def test_mcp_serve_documents_the_read_only_boundary() -> None:
+    result = runner.invoke(app, ["mcp", "serve", "--help"])
+
+    assert result.exit_code == 0
+    assert "--results-root" in result.output
+    assert "stdio" in result.output
+
+
+def test_mcp_serve_rejects_a_results_root_that_does_not_exist(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["mcp", "serve", "--results-root", str(tmp_path / "nowhere")])
+
+    assert result.exit_code == 2
