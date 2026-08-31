@@ -6,11 +6,12 @@ This repository is a public portfolio project exploring how data governance —
 ownership, classification, lineage, contracts and quality — can be expressed as
 typed, tested, version-controlled code rather than as documents in a wiki.
 
-> **Status: milestone 5 — data quality.** This repository contains the core
-> domain model, a deterministic generator for a small synthetic study, YAML data
-> contracts over the generated CSVs, study-level data-quality checks, and a
-> Nextflow pipeline that puts both in front of curation as gates. There is no
-> catalogue or lineage integration yet. See [Deferred work](#deferred-work).
+> **Status: milestone 6 — lineage.** This repository contains the core domain
+> model, a deterministic generator for a small synthetic study, YAML data
+> contracts over the generated CSVs, study-level data-quality checks, a Nextflow
+> pipeline that puts both in front of curation as gates, and OpenLineage events
+> recording what a governed run produced. There is no catalogue integration yet.
+> See [Deferred work](#deferred-work).
 
 ## What is here today
 
@@ -25,6 +26,8 @@ typed, tested, version-controlled code rather than as documents in a wiki.
   PASS/WARN/FAIL with a JSON evidence file.
 - A [Nextflow](https://www.nextflow.io/) pipeline in which raw data reaches the
   curated directory only by passing both gates.
+- [OpenLineage](https://openlineage.io/) START and COMPLETE events, written as
+  local JSONL, recording which raw datasets a curated directory came from.
 - A [Typer](https://typer.tiangolo.com/) CLI, `bio-gov`.
 - A full test suite, lint, format and type checks, wired into GitHub Actions.
 
@@ -39,6 +42,7 @@ uv run bio-gov demo generate
 uv run bio-gov contract validate contracts/samples.v1.yaml data/raw/BIO-001/samples.csv
 uv run bio-gov dq run data/raw/BIO-001
 nextflow run pipelines/nextflow/main.nf
+cat results/BIO-001/lineage/openlineage.jsonl
 ```
 
 ## Synthetic data
@@ -162,6 +166,56 @@ There is no numeric score, no history and no drift detection. See
 [Data quality](docs/data-quality.md) for the six checks and what each one sees
 that a contract cannot.
 
+## Lineage
+
+Contracts say a file is well-formed and quality says a study is usable. Neither
+says where a curated file came from. `bio-gov lineage emit` records that as
+[OpenLineage](https://openlineage.io/) events — an open specification with a
+maintained client, so the evidence is a shape other tools already read rather
+than a private format of our own.
+
+```bash
+uv run bio-gov lineage emit \
+  data/raw/BIO-001 \
+  results/BIO-001/curated \
+  --quality-report results/BIO-001/quality/dq-report.json \
+  --output results/BIO-001/lineage/openlineage.jsonl
+```
+
+```
+Study: BIO-001
+Run ID: 9b000a58-c152-4f67-ac69-df2afe381215
+  in   bio://BIO-001/raw/samples
+  in   bio://BIO-001/raw/compounds
+  in   bio://BIO-001/raw/expression
+  out  bio://BIO-001/curated/samples
+  out  bio://BIO-001/curated/compounds
+  out  bio://BIO-001/curated/expression
+  out  bio://BIO-001/quality/dq-report
+
+Lineage: results/BIO-001/lineage/openlineage.jsonl
+```
+
+One *job* — `bio-governance-lab` / `curate-study` — is the curation activity and
+never changes. One *run* is a single execution of it, a fresh UUID each time,
+described by two events sharing that ID:
+
+```json
+{"eventType": "START",    "run": {"runId": "9b000a58-…"}, "job": {"namespace": "bio-governance-lab", "name": "curate-study"}, …}
+{"eventType": "COMPLETE", "run": {"runId": "9b000a58-…"}, …}
+```
+
+Datasets reuse the project's existing `bio://` identifiers rather than
+introducing a second convention, so `raw/samples` and `curated/samples` are the
+same names `study.json` and the domain model already use. Both events are
+written as the two lines of one JSON Lines file by OpenLineage's own
+`FileTransport` — a file, not a server. Unlike generated data, lineage is not
+byte-for-byte reproducible: a UUID and a UTC timestamp are what make an event
+describe *this* execution.
+
+Exit status is `0` on success and `2` when a required file is missing. There is
+no `1`: emitting provenance is not a verdict. See [Lineage](docs/lineage.md).
+
 ## The pipeline
 
 `pipelines/nextflow/` is a small DSL2 workflow whose only argument is that
@@ -169,16 +223,18 @@ governance can gate processing:
 
 ```
 data/raw/<STUDY>/
-  -> CONTRACT_GATE_COMPOUNDS -> CONTRACT_GATE_SAMPLES -> RUN_DATA_QUALITY -> CURATE
-                                                                              |
-                                                            results/<STUDY>/curated/
+  -> CONTRACT_GATE_COMPOUNDS -> CONTRACT_GATE_SAMPLES -> RUN_DATA_QUALITY
+       -> CURATE -> EMIT_OPENLINEAGE
+                          |
+      results/<STUDY>/{curated/, quality/, contracts/, lineage/}
 ```
 
 Structure is checked first — a malformed file cannot meaningfully be assessed
 for consistency — then the study as a whole. Each process consumes the previous
 one's output channel and nothing else, so `CURATE` cannot start until both
 contracts and all six checks have passed, and `bio-gov` exits non-zero on a
-failure, which terminates the run.
+failure, which terminates the run. `EMIT_OPENLINEAGE` consumes `CURATE`'s
+output, so provenance is only ever recorded for a curated directory that exists.
 
 ```bash
 uv run bio-gov demo generate --study BIO-001
@@ -186,15 +242,16 @@ nextflow run pipelines/nextflow/main.nf
 ```
 
 ```
-[8e/0b21cd] Submitted process > CONTRACT_GATE_COMPOUNDS (BIO-001)
-[40/47536f] Submitted process > CONTRACT_GATE_SAMPLES (BIO-001)
-[ed/3d5e9c] Submitted process > RUN_DATA_QUALITY (BIO-001)
-[45/06ad48] Submitted process > CURATE (BIO-001)
+[c6/45c610] Submitted process > CONTRACT_GATE_COMPOUNDS (BIO-001)
+[83/179858] Submitted process > CONTRACT_GATE_SAMPLES (BIO-001)
+[dd/a7c3f0] Submitted process > RUN_DATA_QUALITY (BIO-001)
+[02/6ad042] Submitted process > CURATE (BIO-001)
+[92/9b58db] Submitted process > EMIT_OPENLINEAGE (BIO-001)
 ```
 
 `results/BIO-001/` then holds `curated/{samples,compounds,expression}.csv`, the
-`contracts/*.contract.txt` reports and `quality/dq-report.json`. Break the study
-and the gate stops it:
+`contracts/*.contract.txt` reports, `quality/dq-report.json` and
+`lineage/openlineage.jsonl`. Break the study and the gate stops it:
 
 ```bash
 uv run bio-gov demo generate --study BIO-002 --inject-invalid-dose --inject-unknown-compound
@@ -213,8 +270,9 @@ ERROR ~ Error executing process > 'CONTRACT_GATE_SAMPLES (BIO-002)'
   row 5  compound_id  foreign_key  CMP-000 not found in compounds.csv column 'compound_id'
 ```
 
-Nextflow exits non-zero, `RUN_DATA_QUALITY` and `CURATE` are never submitted,
-and no `results/BIO-002/curated/` directory is written.
+Nextflow exits non-zero, `RUN_DATA_QUALITY`, `CURATE` and `EMIT_OPENLINEAGE`
+are never submitted, and no `results/BIO-002/curated/` or `lineage/` directory is
+written.
 
 Data that satisfies every contract can still be stopped, one process later. Take
 a clean study, delete its vehicle-control rows, and both contract gates pass
@@ -227,6 +285,9 @@ ERROR ~ Error executing process > 'RUN_DATA_QUALITY (BIO-003)'
   Data quality: FAIL
   FAIL  vehicle_control_presence     no sample carries the 'vehicle' control treatment
 ```
+
+`CURATE` and `EMIT_OPENLINEAGE` do not run, so there is no curated output to
+claim provenance for and none is claimed. Lineage for failed runs is deferred.
 
 | Parameter | Default |
 | --- | --- |
@@ -312,18 +373,26 @@ Nextflow checks its behaviour.
   validation and exit codes.
 - [Data quality](docs/data-quality.md) — contracts versus quality, the six
   checks, PASS/WARN/FAIL and the JSON evidence.
+- [Lineage](docs/lineage.md) — why OpenLineage, job/run/dataset, the local JSONL
+  transport and what is deferred.
 
 ## Deferred work
 
-Deliberately **not** implemented in this milestone: OpenLineage, OpenMetadata,
-DataHub, MCP and AI-agent governance. Each will land as its own milestone on top
+Deliberately **not** implemented in this milestone: OpenMetadata, DataHub,
+Marquez, MCP and AI-agent governance. Each will land as its own milestone on top
 of this foundation. The pipeline is local-execution only — no Kubernetes, no
 cloud executor, no container registry.
 
 Data quality here is a single run's evidence and a gate that acts on it. There
 is no numeric score, no stored history, no drift detection and no dashboard:
 those need somewhere to record a series of results and a reason to compare them,
-which arrives with catalogue and lineage integration.
+which arrives with catalogue integration.
+
+Lineage is written to a local file and nothing reads it back. There is no
+lineage server, HTTP or Kafka transport, database or catalogue sync; a stopped
+run emits nothing, so failed-run lineage is deferred too. Nextflow's own
+experimental lineage feature is deliberately not mixed in — the provenance here
+is orchestrator-agnostic on purpose.
 
 ## Licence
 

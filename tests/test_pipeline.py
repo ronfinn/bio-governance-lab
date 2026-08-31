@@ -78,6 +78,7 @@ def test_the_gates_are_named_in_the_process_names() -> None:
     assert "process CONTRACT_GATE_SAMPLES" in script
     assert "process RUN_DATA_QUALITY" in script
     assert "process CURATE" in script
+    assert "process EMIT_OPENLINEAGE" in script
 
 
 def test_the_pipeline_declares_the_documented_parameters() -> None:
@@ -97,6 +98,9 @@ def test_curation_never_runs_before_the_gates() -> None:
     curate_call = script.index("CURATE(\n", quality_call)
     assert "quality_passed" in script[curate_call : curate_call + 200]
 
+    lineage_call = script.index("EMIT_OPENLINEAGE(\n", curate_call)
+    assert "curated" in script[lineage_call : lineage_call + 200]
+
 
 @needs_nextflow
 def test_clean_data_passes_the_gate_and_is_curated(tmp_path: Path) -> None:
@@ -115,6 +119,13 @@ def test_clean_data_passes_the_gate_and_is_curated(tmp_path: Path) -> None:
     assert "PASS" in (reports / "samples.contract.txt").read_text(encoding="utf-8")
     quality = tmp_path / "results" / "BIO-001" / "quality" / "dq-report.json"
     assert json.loads(quality.read_text(encoding="utf-8"))["overall_status"] == "pass"
+
+    lineage = tmp_path / "results" / "BIO-001" / "lineage" / "openlineage.jsonl"
+    events = [json.loads(line) for line in lineage.read_text(encoding="utf-8").splitlines()]
+    assert [event["eventType"] for event in events] == ["START", "COMPLETE"]
+    assert len({event["run"]["runId"] for event in events}) == 1
+    assert "bio://BIO-001/raw/samples" in [d["name"] for d in events[0]["inputs"]]
+    assert "bio://BIO-001/curated/samples" in [d["name"] for d in events[1]["outputs"]]
 
 
 @needs_nextflow
@@ -136,6 +147,7 @@ def test_contract_invalid_data_stops_at_the_contract_gate(tmp_path: Path) -> Non
     results = tmp_path / "results" / "BIO-001"
     assert not (results / "quality").exists()
     assert not (results / "curated").exists()
+    assert not (results / "lineage").exists()
 
 
 @needs_nextflow
@@ -157,3 +169,4 @@ def test_contract_valid_but_low_quality_data_stops_at_the_quality_gate(tmp_path:
     results = tmp_path / "results" / "BIO-001"
     assert "PASS" in (results / "contracts" / "samples.contract.txt").read_text(encoding="utf-8")
     assert not (results / "curated").exists()
+    assert not (results / "lineage").exists()

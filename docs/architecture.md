@@ -2,11 +2,12 @@
 
 ## Scope of this milestone
 
-This repository is at milestone 5: a tested Python foundation, a deterministic
+This repository is at milestone 6: a tested Python foundation, a deterministic
 generator for a small synthetic study, YAML data contracts validated against the
-generated CSVs, study-level data-quality checks over the study as a whole, and a
-Nextflow pipeline that runs both as gates in front of curation. No history is
-kept and no external catalogue is contacted.
+generated CSVs, study-level data-quality checks over the study as a whole, a
+Nextflow pipeline that runs both as gates in front of curation, and OpenLineage
+events recording what a successful run produced. No history is kept and no
+external catalogue is contacted.
 
 Everything that follows is designed to be added *on top of* this model rather
 than to replace it.
@@ -34,9 +35,12 @@ src/bio_governance/
         __init__.py        public quality exports
         models.py          QualityCheck, status, check result, report
         checks.py          the six study-level checks
+    lineage/
+        __init__.py        public lineage exports
+        openlineage.py     job/dataset identity, START and COMPLETE emission
 contracts/                 the contract definitions themselves (YAML)
 pipelines/nextflow/
-    main.nf                contract-gated curation workflow (DSL2)
+    main.nf                gated curation and lineage workflow (DSL2)
     nextflow.config        parameters, manifest, error strategy
 tests/                     pytest suite
 data/                      generated output (git-ignored)
@@ -194,6 +198,69 @@ processing, and a plausible-looking scientific transformation would only add
 code that nobody can check and distract from the one claim being made. Nothing
 about the gate changes when a real step replaces it.
 
+**Lineage is OpenLineage, not a format of our own.** Provenance is only worth
+recording if something other than this repository can read it. OpenLineage is an
+open, versioned specification with a maintained Python client, and the events
+here are built from its `event_v2` models and written by its own
+`FileTransport` — nothing in `lineage/` defines a schema. A bespoke
+`lineage.json` would have been quicker and would have had to be thrown away the
+first time a catalogue was introduced.
+
+**A stable job, a fresh run.** The job — `bio-governance-lab` / `curate-study` —
+is the curation *activity* and never changes; a run is one execution of it, a
+new UUID each time, described by a START and a COMPLETE event that share that
+ID. Collapsing the two would make one of the two obvious questions
+unanswerable: a job that changed identity per execution cannot be asked how
+often it fails, and a run that reused one cannot be asked what *that* execution
+read.
+
+**Datasets reuse `AssetIdentifier`, in one namespace.** A dataset's OpenLineage
+name is the `bio://<STUDY>/<stage>/<dataset>` URI the generator, `study.json`
+and the domain model already use, built through `AssetIdentifier` rather than
+formatted by hand. The namespace is the single string `bio-governance-lab`,
+because the URI already carries the study and the lifecycle stage. Minting a
+second identifier convention for lineage would guarantee a reconciliation
+problem the moment a catalogue had to join the two.
+
+**Lineage is the one thing here that is deliberately not reproducible.**
+Generated data is a pure function of its arguments; a lineage event is not, and
+must not be. A run ID and a UTC timestamp are exactly what make an event
+describe *this* execution rather than the last one, so the tests assert on event
+structure — states, identities, dataset names — and never on bytes.
+
+**A file, not a server.** `FileTransport` in append mode writes both events as
+the two lines of `results/<STUDY>/lineage/openlineage.jsonl`. An HTTP transport
+to Marquez or a catalogue would be infrastructure to stand up and maintain
+before there is anything to ask it, and it would send these same events under
+this same schema — so swapping later is configuration, not a rewrite.
+
+**Provenance is only claimed for files that exist.** Every raw and curated file
+the events name is checked before anything is emitted; a missing one is a
+`LineageError` and exit status 2. Lineage that asserts a file was produced when
+it was not is worse than no lineage, because it reads as evidence. There is no
+exit status 1: emitting provenance is a record, not a verdict, so it has nothing
+to fail.
+
+**Failed runs emit nothing, for now.** `EMIT_OPENLINEAGE` consumes `CURATE`'s
+output channel, so a run stopped at a gate never reaches it and no
+`lineage/` directory is published. OpenLineage has a `FAIL` state and emitting
+it would be useful, but doing so requires emission from somewhere that survives
+the failure — a softened `errorStrategy` or a completion handler — and both are
+decisions about the pipeline's failure semantics that this milestone chose not
+to make on the way past.
+
+**Nextflow's own experimental lineage is deliberately not used.** Recent
+versions ship a built-in lineage feature. It describes a run in Nextflow's terms
+and is tied to Nextflow's lifecycle, whereas the argument this milestone is
+making is that provenance is orchestrator-agnostic — the same argument that made
+the gates shell out to `bio-gov` rather than import it. Running both would
+produce two lineage records of one run with no rule for which is authoritative.
+
+**Events carry identities and nothing else.** No schema facet, no column-level
+lineage, no data-quality facet. Facets are worth adding when something reads
+them; adding them first is how a lineage layer becomes decoration that drifts
+from the data it claims to describe.
+
 **Local execution, and no executor configuration.** `nextflow.config` sets
 parameters, a manifest and `errorStrategy = 'terminate'`, and nothing else. A
 retry strategy would be actively wrong here — a contract violation is a verdict,
@@ -225,8 +292,8 @@ shaped by the first real integration, not guessed at ahead of it.
 
 ## Where this is heading
 
-Later milestones will add OpenLineage events and catalogue integration with
-OpenMetadata and DataHub, followed by MCP and AI-agent governance. Each of those is expected to consume the
+Later milestones will add catalogue integration with OpenMetadata and DataHub,
+followed by MCP and AI-agent governance. Each of those is expected to consume the
 `Asset` model rather than define its own, and to run against the synthetic study
 — including the deliberately broken versions of it.
 
@@ -239,6 +306,12 @@ is only one renderer of it.
 should be set from. It is already serialized as JSON evidence beside every run,
 so a catalogue integration reads a file rather than re-deriving a verdict.
 
-The pipeline is the third seam. A lineage milestone has a place to emit run and
-dataset events from, and a catalogue milestone has a producer of curated assets
-to register — both without changing what the gates mean.
+The pipeline is the third seam. The lineage milestone emitted its run and
+dataset events from the end of it without changing what the gates mean, and a
+catalogue milestone has a producer of curated assets to register on the same
+terms.
+
+`openlineage.jsonl` is the fourth. It is already the wire format a catalogue
+would be sent, so an OpenMetadata or DataHub integration reads events off disk —
+or swaps the transport — rather than re-deriving the raw-to-curated relationship
+from the pipeline.
