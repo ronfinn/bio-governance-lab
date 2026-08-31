@@ -10,11 +10,12 @@ subject data ever belongs in this repository.
 
 ## Current milestone
 
-Milestone 7: domain models, CLI, tests, CI, deterministic synthetic study
+Milestone 8: domain models, CLI, tests, CI, deterministic synthetic study
 generation, YAML data contracts and contract validation, study-level
 data-quality checks, a Nextflow pipeline that gates curation on both,
-OpenLineage provenance events for a successful run, and publication of the
-governed assets into a local OpenMetadata instance.
+OpenLineage provenance events for a successful run, publication of the governed
+assets into a local OpenMetadata instance, and one deterministic
+READY/REVIEW/BLOCKED governance decision derived from that evidence.
 
 **Not yet implemented, and not to be added without being asked:** DataHub,
 Marquez, MCP, AI-agent governance. The pipeline is local-execution only: no
@@ -41,6 +42,8 @@ uv run bio-gov demo generate  # write a synthetic study to data/raw/
 
 # validate generated data against a contract
 uv run bio-gov contract validate contracts/samples.v1.yaml data/raw/BIO-001/samples.csv
+uv run bio-gov contract validate contracts/samples.v1.yaml data/raw/BIO-001/samples.csv \
+  --json-out results/BIO-001/contracts/samples.contract.json
 
 # evaluate a whole study for data quality
 uv run bio-gov dq run data/raw/BIO-001
@@ -51,6 +54,11 @@ export OPENMETADATA_JWT_TOKEN=...            # never a flag, never committed
 uv run bio-gov catalog openmetadata health
 uv run bio-gov catalog openmetadata publish data/raw/BIO-001 results/BIO-001
 uv run bio-gov catalog openmetadata get BIO-001
+
+# decide whether a study's evidence makes it ready to use
+uv run bio-gov governance evaluate results/BIO-001
+uv run bio-gov governance evaluate results/BIO-001 \
+  --json-out results/BIO-001/governance/governance-report.json
 
 # emit OpenLineage provenance for a curation run
 uv run bio-gov lineage emit data/raw/BIO-001 results/BIO-001/curated \
@@ -82,6 +90,9 @@ all four before committing.
 - `src/bio_governance/lineage/` — `openlineage.py` holds the job, dataset and
   run identities and `emit_curation_lineage`. Export new public names from
   `lineage/__init__.py`.
+- `src/bio_governance/governance/` — `models.py` for the decision, status,
+  check and report models, `evaluate.py` for the five checks over a results
+  directory. Export new public names from `governance/__init__.py`.
 - `src/bio_governance/catalog/` — `models.py` for the configuration and result
   models, `mapping.py` for the `bio://`-to-OpenMetadata mapping (no IO, no
   HTTP), `client.py` for the REST client, `publish.py` for orchestration.
@@ -101,7 +112,8 @@ all four before committing.
   `synthetic-data.md` (the generated study), `data-contracts.md` (the contract
   format and validation), `data-quality.md` (the checks and the evidence),
   `lineage.md` (OpenLineage job, run, datasets and transport),
-  `openmetadata.md` (containers, identity mapping, auth, idempotence, lineage).
+  `openmetadata.md` (containers, identity mapping, auth, idempotence, lineage),
+  `governance-evaluation.md` (the decision model, the five checks, exit codes).
 - `data/` — generated output. Git-ignored; never commit generated data.
 - `results/` — pipeline output. Git-ignored, like `work/` and `.nextflow*`.
 
@@ -167,15 +179,17 @@ all four before committing.
   lets the exit code decide; it never imports `validate_dataset`,
   `evaluate_study` or `emit_curation_lineage`. The exit code is the
   orchestrator-agnostic interface.
-- **The gates are structural.** `EMIT_OPENLINEAGE` consumes `CURATE`'s output
-  channel, which consumes `RUN_DATA_QUALITY`'s, which consumes the samples
-  gate's, which consumes the compounds gate's. Never give a downstream process a
+- **The gates are structural.** `EVALUATE_GOVERNANCE` joins every upstream
+  process's output channel; `EMIT_OPENLINEAGE` consumes `CURATE`'s, which
+  consumes `RUN_DATA_QUALITY`'s, which consumes the samples gate's, which
+  consumes the compounds gate's. Never give a downstream process a
   path to raw data that bypasses a gate, and never soften
   `errorStrategy = 'terminate'` — a governance failure is a verdict, not a
   transient failure.
 - **Processes carry governance in their names.** `CONTRACT_GATE_*`,
-  `RUN_DATA_QUALITY` and `EMIT_OPENLINEAGE`, so a run log shows where the
-  decision happened and where its provenance was recorded.
+  `RUN_DATA_QUALITY`, `EMIT_OPENLINEAGE` and `EVALUATE_GOVERNANCE`, so a run log
+  shows where the decision happened, where its provenance was recorded and where
+  the verdict was reached.
 - **The curated step stays trivial.** It copies files. Do not invent a
   scientific transformation to make the pipeline look substantial.
 - **Lineage uses OpenLineage's models, never our own.** Events are built from
@@ -225,6 +239,30 @@ all four before committing.
   variable.
 - **The pipeline must run with OpenMetadata offline.** Publication is an explicit
   post-run command, not a process in `main.nf`.
+- **Deterministic code decides; AI explains.** The governance decision is
+  computed from files on disk — no clock, network, catalogue, randomness or
+  model. A later milestone may have an LLM explain a report; it must never
+  calculate or override one, and `decision` being a computed field is what makes
+  that impossible rather than merely discouraged.
+- **The decision is derived, never stored.** Any `FAIL` gives `BLOCKED`,
+  otherwise any `WARN` gives `REVIEW`, otherwise `READY`. There is no numeric
+  governance score. A report cannot claim a verdict its checks do not support.
+- **The governance check vocabulary is closed**, like the contract rules and the
+  quality checks. Adding a check means adding a named `GovernanceCheck` member.
+  Five checks do not need a policy engine, a rule language or Rego.
+- **A check must read real evidence.** Ownership, classification, retention,
+  access control and catalogue presence are not checks yet, because nothing in
+  this project produces evidence for them and a check that reads nothing always
+  passes.
+- **Absent or incoherent evidence is a `FAIL`, not an exception.** Exit status 2
+  is reserved for a results directory that cannot be read as a study at all —
+  there is no verdict to give. Everything else is `BLOCKED`.
+- **Evidence is written before the exit status is decided**, in every layer.
+  `contract validate --json-out` and `dq run --json-out` both write, pass or
+  fail, because the failing run is the one whose evidence is wanted.
+- **The contract JSON is the existing `ContractValidationResult`.** No second
+  contract-result model; `passed` is a computed field so the evidence states its
+  own verdict.
 - Line length is 100. Ruff owns formatting.
 
 ## Testing
@@ -266,6 +304,14 @@ formats, the six-edge set, useful messages for connection and token failures,
 and that a second publication sends the same requests as the first. The live
 demonstration lives in `tests/test_catalog_live.py` and skips unless
 `OPENMETADATA_INTEGRATION_TEST=1`.
+
+Governance tests evaluate evidence that was actually produced: `build_results`
+in `conftest.py` runs the same commands `main.nf` does, and a test then damages
+one piece of it and asserts on the named check and the decision. Do not
+hand-author an evidence file into the shape the evaluator hopes to find, and do
+not change the generator to manufacture a warning — edit the quality report. The
+decision tests prove derivation directly: a report handed `decision=READY`
+alongside a failing check still reads `BLOCKED`.
 
 Contract tests load the real YAML from `contracts/` rather than inline
 definitions, so the shipped contracts are what is under test. Every `--inject-*`

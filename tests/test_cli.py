@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from bio_governance import __version__
 from bio_governance.cli import app
+from conftest import build_results
 
 runner = CliRunner()
 
@@ -263,3 +264,112 @@ def test_dq_run_rejects_a_missing_directory(tmp_path: Path) -> None:
     result = runner.invoke(app, ["dq", "run", str(tmp_path / "absent")])
 
     assert result.exit_code != 0
+
+
+def test_contract_validate_writes_the_structured_result(tmp_path: Path) -> None:
+    """The evidence the governance layer reads is the validator's own result."""
+    study = generated_study(tmp_path)
+    result_path = tmp_path / "results" / "BIO-001" / "contracts" / "samples.contract.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "contract",
+            "validate",
+            str(CONTRACTS / "samples.v1.yaml"),
+            str(study / "samples.csv"),
+            "--json-out",
+            str(result_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    document = json.loads(result_path.read_text(encoding="utf-8"))
+    assert document["contract_id"] == "bio.samples"
+    assert document["version"] == "1.0.0"
+    assert document["rows_checked"] == 20
+    assert document["violations"] == []
+    assert document["passed"] is True
+    assert str(result_path) in result.output
+
+
+def test_contract_validate_writes_the_result_for_a_failing_dataset_too(tmp_path: Path) -> None:
+    study = generated_study(tmp_path, "--inject-invalid-dose")
+    result_path = tmp_path / "samples.contract.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "contract",
+            "validate",
+            str(CONTRACTS / "samples.v1.yaml"),
+            str(study / "samples.csv"),
+            "--json-out",
+            str(result_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    document = json.loads(result_path.read_text(encoding="utf-8"))
+    assert document["passed"] is False
+    assert [violation["rule"] for violation in document["violations"]] == ["minimum"]
+
+
+def test_governance_help_is_listed() -> None:
+    result = runner.invoke(app, ["governance", "--help"])
+
+    assert result.exit_code == 0
+    assert "evaluate" in result.output
+
+
+def test_governance_evaluate_returns_zero_for_a_ready_study(tmp_path: Path) -> None:
+    results = build_results(tmp_path)
+
+    result = runner.invoke(app, ["governance", "evaluate", str(results)])
+
+    assert result.exit_code == 0
+    assert "Study: BIO-001" in result.output
+    assert "Decision: READY" in result.output
+    for check in (
+        "samples_contract",
+        "compounds_contract",
+        "data_quality",
+        "curated_outputs",
+        "lineage_evidence",
+    ):
+        assert f"PASS  {check}" in result.output
+
+
+def test_governance_evaluate_returns_one_for_a_blocked_study(tmp_path: Path) -> None:
+    results = build_results(tmp_path)
+    (results / "lineage" / "openlineage.jsonl").unlink()
+
+    result = runner.invoke(app, ["governance", "evaluate", str(results)])
+
+    assert result.exit_code == 1
+    assert "Decision: BLOCKED" in result.output
+    assert "FAIL  lineage_evidence" in result.output
+
+
+def test_governance_evaluate_writes_the_structured_report(tmp_path: Path) -> None:
+    results = build_results(tmp_path)
+    report_path = results / "governance" / "governance-report.json"
+
+    result = runner.invoke(
+        app, ["governance", "evaluate", str(results), "--json-out", str(report_path)]
+    )
+
+    assert result.exit_code == 0
+    document = json.loads(report_path.read_text(encoding="utf-8"))
+    assert document["decision"] == "ready"
+    assert len(document["checks"]) == 5
+    assert str(report_path) in result.output
+
+
+def test_governance_evaluate_returns_two_for_a_directory_that_is_not_a_study(
+    tmp_path: Path,
+) -> None:
+    result = runner.invoke(app, ["governance", "evaluate", str(tmp_path)])
+
+    assert result.exit_code == 2
+    assert "not named for a study" in result.output
