@@ -4,11 +4,21 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
 from bio_governance import __version__
+from bio_governance.catalog import (
+    DEFAULT_CONTRACT_DIR,
+    CatalogError,
+    OpenMetadataClient,
+    OpenMetadataConfig,
+    PublishedCatalog,
+    fully_qualified_name,
+    publish_study,
+    study_identifiers,
+)
 from bio_governance.contracts import (
     ContractError,
     ContractValidationResult,
@@ -76,6 +86,20 @@ lineage_app = typer.Typer(
 )
 app.add_typer(lineage_app, name="lineage")
 
+catalog_app = typer.Typer(
+    name="catalog",
+    help="Publish governed assets to a metadata catalogue.",
+    no_args_is_help=True,
+)
+app.add_typer(catalog_app, name="catalog")
+
+openmetadata_app = typer.Typer(
+    name="openmetadata",
+    help="Publish to a local OpenMetadata instance.",
+    no_args_is_help=True,
+)
+catalog_app.add_typer(openmetadata_app, name="openmetadata")
+
 
 def _version_callback(value: bool) -> None:
     if value:
@@ -107,6 +131,7 @@ def info() -> None:
     typer.echo("YAML data contracts over the generated CSVs: 'bio-gov contract validate'.")
     typer.echo("Study-level data-quality evidence: 'bio-gov dq run'.")
     typer.echo("OpenLineage provenance events for a curation run: 'bio-gov lineage emit'.")
+    typer.echo("Publication to a local OpenMetadata: 'bio-gov catalog openmetadata publish'.")
 
 
 @demo_app.command("generate")
@@ -384,6 +409,160 @@ def lineage_emit(
     for identifier in emitted.outputs:
         typer.echo(f"  out  {identifier}")
     typer.echo(f"\nLineage: {emitted.output}")
+
+
+@openmetadata_app.command("health")
+def catalog_health() -> None:
+    """Report whether the configured OpenMetadata instance is reachable.
+
+    Deliberately answerable without a token: while a token is being obtained,
+    "is the server up?" is the question worth asking. The token's presence is
+    reported, never its value. Exits 0 when the server answered and 2 when it
+    did not.
+    """
+    config = OpenMetadataConfig.from_env()
+    typer.echo(f"Host: {config.host}")
+    typer.echo(f"Token: {config.token_hint}")
+
+    try:
+        with OpenMetadataClient(config) as client:
+            version = client.version()
+    except CatalogError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(ERROR_EXIT_CODE) from exc
+
+    typer.echo(f"OpenMetadata: {version}")
+
+
+@openmetadata_app.command("publish")
+def catalog_publish(
+    raw: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            help="Raw study directory, e.g. data/raw/BIO-001.",
+        ),
+    ],
+    results: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            help="Pipeline results directory, e.g. results/BIO-001.",
+        ),
+    ],
+    contracts: Annotated[
+        Path,
+        typer.Option("--contracts", help="Directory the shipped contracts are read from."),
+    ] = DEFAULT_CONTRACT_DIR,
+) -> None:
+    """Publish a study's governed assets and their lineage to OpenMetadata.
+
+    Upserts one CustomStorage service, the study's seven containers, and the
+    six lineage edges this project can explain. Running it twice updates the
+    same entities rather than creating a second set. Exits 0 on success and 2
+    when the catalogue could not be reached or a claimed file is missing.
+    """
+    config = OpenMetadataConfig.from_env()
+    try:
+        with OpenMetadataClient(config) as client:
+            version = client.version()
+            published = publish_study(client, raw, results, contract_dir=contracts)
+    except CatalogError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(ERROR_EXIT_CODE) from exc
+
+    typer.echo(f"OpenMetadata: {version} at {config.host}")
+    for line in _format_catalog(published):
+        typer.echo(line)
+
+
+@openmetadata_app.command("get")
+def catalog_get(
+    study: Annotated[
+        str,
+        typer.Argument(help="Study identifier whose published assets to retrieve, e.g. BIO-001."),
+    ],
+) -> None:
+    """Read a study's published assets back out of OpenMetadata.
+
+    This is the verification half of publication: it asks the catalogue what it
+    holds rather than trusting what was sent. Each container is fetched by its
+    fully qualified name and reported with the bio:// identifier it carries in
+    ``fullPath``, and the raw samples container's lineage is fetched too, so the
+    edges can be confirmed through the API rather than by looking at the UI.
+    Exits 0 when every expected asset came back and 2 when one did not.
+    """
+    config = OpenMetadataConfig.from_env()
+    identifiers = study_identifiers(study)
+
+    try:
+        with OpenMetadataClient(config) as client:
+            containers = [
+                (identifier, client.get_container(fully_qualified_name(identifier)))
+                for identifier in identifiers
+            ]
+            downstream = _downstream_names(client.get_lineage(fully_qualified_name(identifiers[0])))
+    except CatalogError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(ERROR_EXIT_CODE) from exc
+
+    typer.echo(f"Study: {study}")
+    typer.echo(f"Assets: {len(containers)}")
+    typer.echo("")
+    width = max(len(str(container.get("fullyQualifiedName", ""))) for _, container in containers)
+    for identifier, container in containers:
+        fqn = str(container.get("fullyQualifiedName", ""))
+        typer.echo(f"  {fqn.ljust(width)}  {container.get('fullPath', '(no fullPath)')}")
+        if container.get("fullPath") != identifier.uri:
+            typer.echo(f"    warning: fullPath is not {identifier.uri}")
+
+    typer.echo(f"\nDownstream of {identifiers[0]}: {len(downstream)}")
+    for name in downstream:
+        typer.echo(f"  {name}")
+
+
+def _format_catalog(published: PublishedCatalog) -> list[str]:
+    """Render a publication as the lines of the CLI summary."""
+    lines = [
+        f"Service: {published.service}",
+        f"Study: {published.study_id}",
+        "",
+        f"{len(published.assets)} assets",
+    ]
+    width = max(len(asset.name) for asset in published.assets)
+    lines += [
+        f"  {asset.name.ljust(width)}  {asset.file_format.value:<4}  {asset.identifier}"
+        for asset in published.assets
+    ]
+    lines += ["", f"{len(published.edges)} lineage edges"]
+    lines += [f"  {edge}" for edge in published.edges]
+    if published.lineage_run_id is not None:
+        lines += ["", f"OpenLineage run: {published.lineage_run_id}"]
+    return lines
+
+
+def _downstream_names(graph: dict[str, Any]) -> list[str]:
+    """The entity names one hop downstream, as OpenMetadata's lineage graph gives them.
+
+    The graph reports edges as entity IDs and the entities themselves in a
+    separate list, so the two have to be joined to say anything readable.
+    """
+    nodes = {
+        str(node.get("id")): str(
+            node.get("fullyQualifiedName") or node.get("name") or node.get("id")
+        )
+        for node in graph.get("nodes", [])
+        if isinstance(node, dict)
+    }
+    entity = graph.get("entity")
+    root = str(entity.get("id")) if isinstance(entity, dict) else None
+    return sorted(
+        nodes.get(str(edge.get("toEntity")), str(edge.get("toEntity")))
+        for edge in graph.get("downstreamEdges", [])
+        if isinstance(edge, dict) and (root is None or str(edge.get("fromEntity")) == root)
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -2,12 +2,13 @@
 
 ## Scope of this milestone
 
-This repository is at milestone 6: a tested Python foundation, a deterministic
+This repository is at milestone 7: a tested Python foundation, a deterministic
 generator for a small synthetic study, YAML data contracts validated against the
 generated CSVs, study-level data-quality checks over the study as a whole, a
-Nextflow pipeline that runs both as gates in front of curation, and OpenLineage
-events recording what a successful run produced. No history is kept and no
-external catalogue is contacted.
+Nextflow pipeline that runs both as gates in front of curation, OpenLineage
+events recording what a successful run produced, and publication of those
+governed assets into a local OpenMetadata instance. No history is kept, and the
+catalogue is contacted only by an explicit post-run command.
 
 Everything that follows is designed to be added *on top of* this model rather
 than to replace it.
@@ -38,10 +39,18 @@ src/bio_governance/
     lineage/
         __init__.py        public lineage exports
         openlineage.py     job/dataset identity, START and COMPLETE emission
+    catalog/
+        __init__.py        public catalogue exports
+        models.py          configuration, asset/edge records, result
+        mapping.py         bio:// -> OpenMetadata entities (no IO, no HTTP)
+        client.py          the OpenMetadata REST client
+        publish.py         file checks, then service, containers, edges
 contracts/                 the contract definitions themselves (YAML)
 pipelines/nextflow/
     main.nf                gated curation and lineage workflow (DSL2)
     nextflow.config        parameters, manifest, error strategy
+infra/openmetadata/
+    README.md              starting/stopping the official Docker quickstart
 tests/                     pytest suite
 data/                      generated output (git-ignored)
 results/                   pipeline output (git-ignored)
@@ -273,6 +282,63 @@ separately, so it is not a project dependency and CI does not install it. The
 pipeline tests run it for real when it is on `PATH` and skip when it is not;
 the static assertions about parameters and process names run everywhere.
 
+**OpenMetadata's REST API, not its Python SDK.** `openmetadata-ingestion`
+resolves to around 130 transitive packages for this environment — dbt-core,
+boto3, grpcio, numpy and the Kubernetes client among them — to issue five kinds
+of request against four documented endpoints. The REST API is the same interface
+the SDK calls, so the client calls it over `httpx` and the dependency list stays
+readable. The SDK becomes the right answer when this project needs ingestion
+workflows or connectors; publishing seven containers is not that. A local
+OpenMetadata is also not made a requirement of the core pipeline: the pipeline
+runs with the server switched off, because a governance gate that depends on a
+catalogue being up is a governance gate that can be skipped by turning the
+catalogue off.
+
+**Containers of a CustomStorage service, because that is what the assets are.**
+The governed outputs are generated files in a directory, and OpenMetadata's model
+for a file is a container belonging to a storage service. `CustomStorage` is the
+vocabulary's own answer for a store it has no connector for. Registering the
+files as MySQL, PostgreSQL or Snowflake tables would be the fastest way to make
+the catalogue say something false, in a project whose entire argument is that its
+statements are checkable.
+
+**`bio://` and the OpenMetadata FQN both survive.** The entity name is derived
+one-way from the identifier — segments joined with underscores, because an entity
+name may carry neither a scheme nor slashes — and the canonical URI is stored
+verbatim in the container's `fullPath`. They answer different questions: an FQN
+says where an entity sits in *one* deployment, and `bio://` says what the asset
+is, in the contracts, the quality reports and the OpenLineage events alike. Move
+to a second OpenMetadata and every FQN changes while no `bio://` identifier does.
+Replacing `AssetIdentifier` with an FQN would have made a deployment detail into
+the project's notion of identity.
+
+**Idempotence is a property of the requests.** Every write is a `PUT`, and
+OpenMetadata's `PUT` routes are create-or-update, so publishing twice addresses
+the same entities. There is no read-then-decide step and no local record of what
+was published — both would be state this project would then have to keep true.
+
+**Only lineage edges that can be stated in a sentence.** Six per study: each raw
+file to the curated copy made from it, and all three raw files to the report that
+judged them. A run event's three inputs and four outputs have a cross product of
+twelve, and deriving all twelve would have the catalogue assert dependencies
+nobody checked. So the OpenLineage events are read for exactly one thing — the
+run ID, reported so a reader can find the JSONL matching what the catalogue holds
+— and are not turned into edges.
+
+**Existence is checked before anything is sent.** As in the lineage layer, every
+file a container will claim is verified first, so a failure leaves nothing
+half-catalogued. A catalogue entry for a file that was never written is worse
+than no entry at all.
+
+**A token is configuration, and only ever configuration.** `OPENMETADATA_HOST`
+and `OPENMETADATA_JWT_TOKEN`, read from the environment, because a token passed
+as a flag lands in a shell history and a process listing. Nothing prints more
+than its length and last four characters. `health` deliberately needs no token:
+"is the server up?" and "do I have credentials?" are different questions, and
+being able to answer the first while obtaining the answer to the second is what
+makes the command useful. No authentication system was built — a JWT in a header
+is the whole mechanism.
+
 **PyYAML, and nothing else new.** A YAML parser is the one thing reading a
 contract requires that the standard library does not provide. Reading CSV,
 matching patterns and comparing numbers it does provide, so no dataframe or
@@ -287,15 +353,18 @@ row of a CSV is not what it is for.
 ## Deliberate non-goals for now
 
 No repository or service abstraction layer, no plugin system, no configuration
-framework, and no base classes beyond Pydantic's. Those interfaces should be
-shaped by the first real integration, not guessed at ahead of it.
+framework, and no base classes beyond Pydantic's. Milestone 7 was the first real
+external integration and did not need any of them: the OpenMetadata client is a
+concrete client, not an implementation of a catalogue interface. A second
+catalogue is what would justify extracting one, and the reusable part —
+`catalog/mapping.py` — is already separate from the transport.
 
 ## Where this is heading
 
-Later milestones will add catalogue integration with OpenMetadata and DataHub,
-followed by MCP and AI-agent governance. Each of those is expected to consume the
-`Asset` model rather than define its own, and to run against the synthetic study
-— including the deliberately broken versions of it.
+Later milestones will add DataHub, followed by MCP and AI-agent governance. Each
+of those is expected to consume the `Asset` model rather than define its own, and
+to run against the synthetic study — including the deliberately broken versions
+of it.
 
 `ContractValidationResult` is the seam those milestones are expected to use. It
 is a structured object, not printed text, so emitting a quality event or setting
@@ -311,7 +380,18 @@ dataset events from the end of it without changing what the gates mean, and a
 catalogue milestone has a producer of curated assets to register on the same
 terms.
 
-`openlineage.jsonl` is the fourth. It is already the wire format a catalogue
-would be sent, so an OpenMetadata or DataHub integration reads events off disk —
-or swaps the transport — rather than re-deriving the raw-to-curated relationship
-from the pipeline.
+`openlineage.jsonl` is the fourth, and milestone 7 used it as one: the catalogue
+reads the run ID off disk rather than re-deriving what the pipeline did. A
+DataHub integration has the same file available on the same terms.
+
+`catalog/mapping.py` is the fifth. It decides what a study looks like in a
+catalogue without performing IO or speaking HTTP, so a second catalogue is a
+second client rather than a second opinion about what the assets are. No
+abstraction was extracted for it: an interface with one implementation is a guess
+about the second, and the mapping is already the shared part.
+
+Wiring publication into the pipeline is the obvious next step and was
+deliberately not taken. A process in `main.nf` that publishes to a catalogue
+makes a running server part of the pipeline's contract, and that is a decision
+worth making once there is a reason to make it — not as a side effect of the
+integration existing.
