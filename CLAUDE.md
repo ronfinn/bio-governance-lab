@@ -10,15 +10,18 @@ subject data ever belongs in this repository.
 
 ## Current milestone
 
-Milestone 5: domain models, CLI, tests, CI, deterministic synthetic study
+Milestone 6: domain models, CLI, tests, CI, deterministic synthetic study
 generation, YAML data contracts and contract validation, study-level
-data-quality checks, and a Nextflow pipeline that gates curation on both.
+data-quality checks, a Nextflow pipeline that gates curation on both, and
+OpenLineage provenance events for a successful run.
 
-**Not yet implemented, and not to be added without being asked:** OpenLineage,
-OpenMetadata, DataHub, MCP, AI-agent governance. The pipeline is
-local-execution only: no Kubernetes, Seqera Platform, cloud executor, container
-registry or DSL2 module library. Data quality has no history, trends, drift
-detection, thresholds, dashboard or database, and no numeric score.
+**Not yet implemented, and not to be added without being asked:** OpenMetadata,
+DataHub, Marquez, MCP, AI-agent governance. The pipeline is local-execution
+only: no Kubernetes, Seqera Platform, cloud executor, container registry or DSL2
+module library. Data quality has no history, trends, drift detection,
+thresholds, dashboard or database, and no numeric score. Lineage has no server,
+HTTP or Kafka transport, database, catalogue sync, failed-run events or custom
+facets, and does not use Nextflow's own experimental lineage feature.
 
 ## Commands
 
@@ -37,6 +40,11 @@ uv run bio-gov contract validate contracts/samples.v1.yaml data/raw/BIO-001/samp
 # evaluate a whole study for data quality
 uv run bio-gov dq run data/raw/BIO-001
 uv run bio-gov dq run data/raw/BIO-001 --json-out results/BIO-001/quality/dq-report.json
+
+# emit OpenLineage provenance for a curation run
+uv run bio-gov lineage emit data/raw/BIO-001 results/BIO-001/curated \
+  --quality-report results/BIO-001/quality/dq-report.json \
+  --output results/BIO-001/lineage/openlineage.jsonl
 
 # run the governance-gated pipeline (needs Nextflow and a JVM, installed separately)
 nextflow run pipelines/nextflow/main.nf
@@ -60,16 +68,20 @@ all four before committing.
 - `src/bio_governance/quality/` — `models.py` for the check and report models,
   `checks.py` for the study-level checks. Export new public names from
   `quality/__init__.py`.
+- `src/bio_governance/lineage/` — `openlineage.py` holds the job, dataset and
+  run identities and `emit_curation_lineage`. Export new public names from
+  `lineage/__init__.py`.
 - `contracts/` — the contract definitions themselves, as YAML. Committed.
 - `pipelines/nextflow/` — `main.nf` holds the DSL2 workflow, `nextflow.config`
   its parameters and manifest. Nothing else belongs here.
 - `src/bio_governance/cli.py` — the `bio-gov` Typer app. The `demo` sub-app
-  hosts generation commands, the `contract` sub-app hosts validation, and the
-  `dq` sub-app hosts quality evaluation.
+  hosts generation commands, the `contract` sub-app hosts validation, the `dq`
+  sub-app hosts quality evaluation, and the `lineage` sub-app hosts emission.
 - `tests/` — mirrors the source modules. Shared fixtures live in `conftest.py`.
 - `docs/` — `architecture.md` (decisions), `governance-model.md` (meaning),
   `synthetic-data.md` (the generated study), `data-contracts.md` (the contract
-  format and validation), `data-quality.md` (the checks and the evidence).
+  format and validation), `data-quality.md` (the checks and the evidence),
+  `lineage.md` (OpenLineage job, run, datasets and transport).
 - `data/` — generated output. Git-ignored; never commit generated data.
 - `results/` — pipeline output. Git-ignored, like `work/` and `.nextflow*`.
 
@@ -131,18 +143,39 @@ all four before committing.
 - **A quality report is counted, not enumerated, where a defect is repetitive.**
   One finding saying "24 of 240 measurements are unusable", never one per cell.
 - **The pipeline shells out to `bio-gov`.** A gate process runs
-  `bio-gov contract validate` or `bio-gov dq run` and lets the exit code decide;
-  it never imports `validate_dataset` or `evaluate_study`. The exit code is the
+  `bio-gov contract validate`, `bio-gov dq run` or `bio-gov lineage emit` and
+  lets the exit code decide; it never imports `validate_dataset`,
+  `evaluate_study` or `emit_curation_lineage`. The exit code is the
   orchestrator-agnostic interface.
-- **The gates are structural.** `CURATE` consumes `RUN_DATA_QUALITY`'s output
-  channel, which consumes the samples gate's, which consumes the compounds
-  gate's. Never give a downstream process a path to raw data that bypasses a
-  gate, and never soften `errorStrategy = 'terminate'` — a governance failure is
-  a verdict, not a transient failure.
-- **Processes carry governance in their names.** `CONTRACT_GATE_*` and
-  `RUN_DATA_QUALITY`, so a run log shows where the decision happened.
+- **The gates are structural.** `EMIT_OPENLINEAGE` consumes `CURATE`'s output
+  channel, which consumes `RUN_DATA_QUALITY`'s, which consumes the samples
+  gate's, which consumes the compounds gate's. Never give a downstream process a
+  path to raw data that bypasses a gate, and never soften
+  `errorStrategy = 'terminate'` — a governance failure is a verdict, not a
+  transient failure.
+- **Processes carry governance in their names.** `CONTRACT_GATE_*`,
+  `RUN_DATA_QUALITY` and `EMIT_OPENLINEAGE`, so a run log shows where the
+  decision happened and where its provenance was recorded.
 - **The curated step stays trivial.** It copies files. Do not invent a
   scientific transformation to make the pipeline look substantial.
+- **Lineage uses OpenLineage's models, never our own.** Events are built from
+  `openlineage.client.event_v2` and written by its `FileTransport`. Do not
+  hand-build the JSON, and do not add a facet nothing reads.
+- **One namespace, and the existing identifier convention.** Job and datasets
+  both live in the `bio-governance-lab` namespace, and a dataset's name is the
+  `bio://` URI built through `AssetIdentifier`. Do not invent a second asset-ID
+  scheme.
+- **A run is START then COMPLETE, sharing one run ID.** The job identity is
+  stable across executions; the run ID is not.
+- **Lineage is not reproducible, and must not be made so.** A run ID and a UTC
+  timestamp are what make an event describe one execution. This is the single
+  deliberate exception to the determinism rule above.
+- **Provenance is only claimed for files that exist.** Every raw and curated
+  file the events name is checked before anything is emitted; a missing one is a
+  `LineageError` and exit status 2. Emission has no failure verdict, so there is
+  no exit status 1.
+- **Failed runs emit nothing.** Do not add `FAIL`-event orchestration, an
+  `onComplete` handler, or an `errorStrategy` change to work around it.
 - **Nextflow is not a Python dependency.** It is installed separately and CI does
   not install it.
 - Line length is 100. Ruff owns formatting.
@@ -167,9 +200,15 @@ Shared CSV-damaging helpers live in `conftest.py`.
 Pipeline tests run Nextflow for real, under `tmp_path`, and skip when Nextflow
 is not on `PATH`; the static assertions about parameters, process names and the
 gate ordering run everywhere. All three outcomes are tested: clean data reaches
-`CURATE`, contract-invalid data stops at the contract gate, and contract-valid
-but low-quality data stops at `RUN_DATA_QUALITY`. Each failing case asserts that
-no curated directory is written.
+`CURATE` and `EMIT_OPENLINEAGE`, contract-invalid data stops at the contract
+gate, and contract-valid but low-quality data stops at `RUN_DATA_QUALITY`. Each
+failing case asserts that no curated *and* no lineage directory is written.
+
+Lineage tests assert on the event structure the spec defines, never on bytes:
+two events, START then COMPLETE, one shared run ID, the job identity, the
+producer, and the raw and curated dataset names. An explicit `run_id` is how a
+test asserts on a known value. The CLI gets a test writing a real JSONL file and
+one proving a missing source file exits 2.
 
 Contract tests load the real YAML from `contracts/` rather than inline
 definitions, so the shipped contracts are what is under test. Every `--inject-*`

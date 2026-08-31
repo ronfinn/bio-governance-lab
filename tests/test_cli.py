@@ -190,6 +190,13 @@ def test_dq_help_is_listed() -> None:
     assert "run" in result.output
 
 
+def test_lineage_help_is_listed() -> None:
+    result = runner.invoke(app, ["lineage", "--help"])
+
+    assert result.exit_code == 0
+    assert "emit" in result.output
+
+
 def test_dq_run_returns_zero_for_a_clean_study(tmp_path: Path) -> None:
     study = generated_study(tmp_path)
 

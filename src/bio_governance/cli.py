@@ -16,6 +16,10 @@ from bio_governance.contracts import (
     load_contract,
     validate_dataset,
 )
+from bio_governance.lineage import (
+    LineageError,
+    emit_curation_lineage,
+)
 from bio_governance.quality import (
     QualityCheckStatus,
     QualityReport,
@@ -65,6 +69,13 @@ dq_app = typer.Typer(
 )
 app.add_typer(dq_app, name="dq")
 
+lineage_app = typer.Typer(
+    name="lineage",
+    help="Emit OpenLineage provenance evidence for a curation run.",
+    no_args_is_help=True,
+)
+app.add_typer(lineage_app, name="lineage")
+
 
 def _version_callback(value: bool) -> None:
     if value:
@@ -95,6 +106,7 @@ def info() -> None:
     typer.echo("Deterministic synthetic study generation: 'bio-gov demo generate'.")
     typer.echo("YAML data contracts over the generated CSVs: 'bio-gov contract validate'.")
     typer.echo("Study-level data-quality evidence: 'bio-gov dq run'.")
+    typer.echo("OpenLineage provenance events for a curation run: 'bio-gov lineage emit'.")
 
 
 @demo_app.command("generate")
@@ -312,6 +324,66 @@ def _format_report(report: QualityReport) -> list[str]:
         else:
             lines.append(f"{label.ljust(width + 6)}  {check.message}")
     return lines
+
+
+@lineage_app.command("emit")
+def lineage_emit(
+    raw: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            help="Raw study directory, e.g. data/raw/BIO-001.",
+        ),
+    ],
+    curated: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            help="Curated output directory, e.g. results/BIO-001/curated.",
+        ),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", "-o", help="JSONL file the events are written to."),
+    ],
+    quality_report: Annotated[
+        Path | None,
+        typer.Option("--quality-report", help="dq-report.json, recorded as a further output."),
+    ] = None,
+    run_id: Annotated[
+        str | None,
+        typer.Option("--run-id", help="Reuse an existing run identity instead of minting one."),
+    ] = None,
+) -> None:
+    """Emit the OpenLineage events describing one governed curation run.
+
+    Writes a START and a COMPLETE event, sharing one run ID, as the two lines of
+    a local JSONL file. The raw files are the run's inputs and the curated files
+    its outputs, so the evidence says which raw study a curated directory came
+    from. Exits 0 on success and 2 when a required file is missing or the events
+    could not be written.
+    """
+    try:
+        emitted = emit_curation_lineage(
+            raw,
+            curated,
+            output,
+            quality_report=quality_report,
+            run_id=run_id,
+        )
+    except LineageError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(ERROR_EXIT_CODE) from exc
+
+    typer.echo(f"Study: {emitted.study_id}")
+    typer.echo(f"Run ID: {emitted.run_id}")
+    for identifier in emitted.inputs:
+        typer.echo(f"  in   {identifier}")
+    for identifier in emitted.outputs:
+        typer.echo(f"  out  {identifier}")
+    typer.echo(f"\nLineage: {emitted.output}")
 
 
 if __name__ == "__main__":  # pragma: no cover

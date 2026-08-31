@@ -3,7 +3,8 @@
 /*
  * bio-governance-lab — governance-gated curation pipeline.
  *
- * Raw synthetic study -> contract gates -> data-quality gate -> curated output.
+ * Raw synthetic study -> contract gates -> data-quality gate -> curated output
+ * -> OpenLineage provenance evidence.
  *
  * The gates are the point of this pipeline. CURATE has no input that does not
  * come through RUN_DATA_QUALITY, which runs only after CONTRACT_GATE_SAMPLES,
@@ -16,6 +17,11 @@
  * conforms to its declared structure; data quality asks whether the study as a
  * whole is consistent and usable. Deleting the vehicle controls from
  * samples.csv passes every contract and fails the quality gate.
+ *
+ * EMIT_OPENLINEAGE sits at the end for the same structural reason: it consumes
+ * CURATE's output directory, so provenance is only ever claimed for a curated
+ * directory that exists. A stopped run emits nothing — lineage for failed runs
+ * is a later milestone.
  */
 
 nextflow.enable.dsl = 2
@@ -86,7 +92,7 @@ process CURATE {
     tuple val(study), path(samples), path(compounds), path(expression)
 
     output:
-    path 'curated'
+    tuple val(study), path('curated')
 
     script:
     // Deliberately trivial: the governance decision has already been made by
@@ -97,6 +103,29 @@ process CURATE {
     cp ${samples}    curated/samples.csv
     cp ${compounds}  curated/compounds.csv
     cp ${expression} curated/expression.csv
+    """
+}
+
+process EMIT_OPENLINEAGE {
+    tag "${study}"
+    publishDir "${params.outdir}/${study}", mode: 'copy'
+
+    input:
+    tuple val(study), path(raw), path(curated), path(dq_report)
+
+    output:
+    tuple val(study), path('lineage')
+
+    script:
+    // The raw directory is staged under its own name, so the study identifier
+    // the events carry is read from the data rather than passed in. `curated`
+    // arrives on CURATE's output channel, which is what makes this process
+    // unreachable for a run that was stopped at a gate.
+    """
+    echo "LINEAGE: ${study}"
+    ${params.bio_gov} lineage emit ${raw} ${curated} \\
+        --quality-report ${dq_report} \\
+        --output lineage/openlineage.jsonl
     """
 }
 
@@ -128,7 +157,11 @@ workflow {
         samples_passed.map { s, _report -> tuple(s, study_json, samples, compounds, expression) }
     )
 
-    CURATE(
+    def curated = CURATE(
         quality_passed.map { s, _report -> tuple(s, samples, compounds, expression) }
+    )
+
+    EMIT_OPENLINEAGE(
+        quality_passed.join(curated).map { s, report, dir -> tuple(s, study_dir, dir, report) }
     )
 }
