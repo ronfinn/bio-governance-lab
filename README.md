@@ -6,12 +6,13 @@ This repository is a public portfolio project exploring how data governance —
 ownership, classification, lineage, contracts and quality — can be expressed as
 typed, tested, version-controlled code rather than as documents in a wiki.
 
-> **Status: milestone 7 — catalogue.** This repository contains the core domain
-> model, a deterministic generator for a small synthetic study, YAML data
-> contracts over the generated CSVs, study-level data-quality checks, a Nextflow
-> pipeline that puts both in front of curation as gates, OpenLineage events
-> recording what a governed run produced, and publication of those governed
-> assets into a local OpenMetadata instance. See
+> **Status: milestone 8 — governance evaluation.** This repository contains the
+> core domain model, a deterministic generator for a small synthetic study, YAML
+> data contracts over the generated CSVs, study-level data-quality checks, a
+> Nextflow pipeline that puts both in front of curation as gates, OpenLineage
+> events recording what a governed run produced, publication of those governed
+> assets into a local OpenMetadata instance, and one deterministic
+> READY/REVIEW/BLOCKED decision derived from all of that evidence. See
 > [Deferred work](#deferred-work).
 
 ## What is here today
@@ -31,6 +32,8 @@ typed, tested, version-controlled code rather than as documents in a wiki.
   local JSONL, recording which raw datasets a curated directory came from.
 - Publication of a study's seven governed assets, and the lineage between
   them, into a local [OpenMetadata](https://open-metadata.org) instance.
+- One deterministic governance decision — READY, REVIEW or BLOCKED — derived
+  from five checks over that evidence. Code decides; a model may only explain.
 - A [Typer](https://typer.tiangolo.com/) CLI, `bio-gov`.
 - A full test suite, lint, format and type checks, wired into GitHub Actions.
 
@@ -46,6 +49,7 @@ uv run bio-gov contract validate contracts/samples.v1.yaml data/raw/BIO-001/samp
 uv run bio-gov dq run data/raw/BIO-001
 nextflow run pipelines/nextflow/main.nf
 cat results/BIO-001/lineage/openlineage.jsonl
+uv run bio-gov governance evaluate results/BIO-001
 ```
 
 With a local OpenMetadata running (see
@@ -122,7 +126,14 @@ row 22  sample_id    unique       duplicate BIO-001-S001 (first seen at row 2)
 
 Exit status is `0` for pass, `1` for fail and `2` if the contract or dataset
 could not be read. Validation is binary — there is no score. `validate_dataset`
-returns a structured `ContractValidationResult`; the CLI only renders it.
+returns a structured `ContractValidationResult`; the CLI only renders it, and
+`--json-out` writes that same result out as evidence for the governance layer:
+
+```bash
+uv run bio-gov contract validate contracts/samples.v1.yaml \
+  data/raw/BIO-001/samples.csv \
+  --json-out results/BIO-001/contracts/samples.contract.json
+```
 
 See [Data contracts](docs/data-contracts.md) for the YAML format, how foreign
 keys resolve, and why contract validation is not the same thing as a
@@ -237,9 +248,9 @@ governance can gate processing:
 ```
 data/raw/<STUDY>/
   -> CONTRACT_GATE_COMPOUNDS -> CONTRACT_GATE_SAMPLES -> RUN_DATA_QUALITY
-       -> CURATE -> EMIT_OPENLINEAGE
+       -> CURATE -> EMIT_OPENLINEAGE -> EVALUATE_GOVERNANCE
                           |
-      results/<STUDY>/{curated/, quality/, contracts/, lineage/}
+      results/<STUDY>/{contracts/, quality/, curated/, lineage/, governance/}
 ```
 
 Structure is checked first — a malformed file cannot meaningfully be assessed
@@ -260,11 +271,13 @@ nextflow run pipelines/nextflow/main.nf
 [dd/a7c3f0] Submitted process > RUN_DATA_QUALITY (BIO-001)
 [02/6ad042] Submitted process > CURATE (BIO-001)
 [92/9b58db] Submitted process > EMIT_OPENLINEAGE (BIO-001)
+[a6/c058ef] Submitted process > EVALUATE_GOVERNANCE (BIO-001)
 ```
 
 `results/BIO-001/` then holds `curated/{samples,compounds,expression}.csv`, the
-`contracts/*.contract.txt` reports, `quality/dq-report.json` and
-`lineage/openlineage.jsonl`. Break the study and the gate stops it:
+`contracts/*.contract.{txt,json}` reports, `quality/dq-report.json`,
+`lineage/openlineage.jsonl` and `governance/governance-report.json`. Break the
+study and the gate stops it:
 
 ```bash
 uv run bio-gov demo generate --study BIO-002 --inject-invalid-dose --inject-unknown-compound
@@ -283,9 +296,9 @@ ERROR ~ Error executing process > 'CONTRACT_GATE_SAMPLES (BIO-002)'
   row 5  compound_id  foreign_key  CMP-000 not found in compounds.csv column 'compound_id'
 ```
 
-Nextflow exits non-zero, `RUN_DATA_QUALITY`, `CURATE` and `EMIT_OPENLINEAGE`
-are never submitted, and no `results/BIO-002/curated/` or `lineage/` directory is
-written.
+Nextflow exits non-zero, `RUN_DATA_QUALITY`, `CURATE`, `EMIT_OPENLINEAGE` and
+`EVALUATE_GOVERNANCE` are never submitted, and no `results/BIO-002/curated/`,
+`lineage/` or `governance/` directory is written.
 
 Data that satisfies every contract can still be stopped, one process later. Take
 a clean study, delete its vehicle-control rows, and both contract gates pass
@@ -299,8 +312,9 @@ ERROR ~ Error executing process > 'RUN_DATA_QUALITY (BIO-003)'
   FAIL  vehicle_control_presence     no sample carries the 'vehicle' control treatment
 ```
 
-`CURATE` and `EMIT_OPENLINEAGE` do not run, so there is no curated output to
-claim provenance for and none is claimed. Lineage for failed runs is deferred.
+`CURATE`, `EMIT_OPENLINEAGE` and `EVALUATE_GOVERNANCE` do not run, so there is
+no curated output to claim provenance for and none is claimed. Lineage for
+failed runs is deferred.
 
 | Parameter | Default |
 | --- | --- |
@@ -371,6 +385,79 @@ See [docs/openmetadata.md](docs/openmetadata.md) for the entity mapping, the
 REST-versus-SDK decision and what is deferred, and
 [infra/openmetadata/README.md](infra/openmetadata/README.md) for the local
 Docker deployment.
+
+## Governance evaluation
+
+Every layer so far produced *evidence*. This one produces a **decision**, and
+the principle it establishes is the point of the milestone:
+
+> **Deterministic code decides. AI explains.**
+
+```bash
+uv run bio-gov governance evaluate results/BIO-001
+```
+
+```
+Study: BIO-001
+Decision: READY
+
+PASS  samples_contract
+PASS  compounds_contract
+PASS  data_quality
+PASS  curated_outputs
+PASS  lineage_evidence
+```
+
+Five checks, read from the pipeline's own output and nothing else — no clock, no
+network, no catalogue, no model:
+
+| Check | Reads | PASS when |
+| --- | --- | --- |
+| `samples_contract` | `contracts/samples.contract.json` | the contract result says the dataset passed |
+| `compounds_contract` | `contracts/compounds.contract.json` | the contract result says the dataset passed |
+| `data_quality` | `quality/dq-report.json` | the quality report's overall status is PASS |
+| `curated_outputs` | `curated/` | all three curated CSVs exist |
+| `lineage_evidence` | `lineage/openlineage.jsonl` | one START and one COMPLETE share a run ID, name the `curate-study` job, and name this study's raw inputs and curated outputs |
+
+The decision is *derived* from those checks, worst-first — any `FAIL` gives
+`BLOCKED`, otherwise any `WARN` gives `REVIEW`, otherwise `READY`:
+
+| Decision | Meaning |
+| --- | --- |
+| `READY` | Every check passed. The study may be used. |
+| `REVIEW` | Nothing failed, but something warned. A person should look. |
+| `BLOCKED` | At least one check failed. The study must not be used. |
+
+`decision` is a computed field on `GovernanceReport`. There is no attribute to
+assign and no constructor argument that takes effect, so nothing — a script, a
+later milestone's language model, or a careless caller — can produce a report
+claiming `READY` while one of its checks fails. A model may one day explain a
+verdict in prose; it will never be able to calculate one.
+
+Delete the provenance from a results directory and the answer changes:
+
+```
+Decision: BLOCKED
+
+FAIL  lineage_evidence    lineage evidence is missing: results/BIO-001/lineage/openlineage.jsonl
+```
+
+Exit status is `0` for `READY`, `1` for `REVIEW` or `BLOCKED`, and `2` only when
+the results directory itself cannot be read as a study's evidence. Missing or
+incoherent evidence is a governance *failure*, not an error — it is precisely
+what this layer exists to catch. `--json-out` writes the structured report:
+
+```bash
+uv run bio-gov governance evaluate results/BIO-001 \
+  --json-out results/BIO-001/governance/governance-report.json
+```
+
+There is no numeric governance score, no policy engine, no rule language and no
+approval workflow. Ownership, classification, retention, access control and
+catalogue presence are deliberately absent: this project has no evidence for
+them yet, and a check that reads nothing always passes.
+
+See [Governance evaluation](docs/governance-evaluation.md).
 
 ## The domain model
 
@@ -449,6 +536,8 @@ Nextflow checks its behaviour.
   transport and what is deferred.
 - [OpenMetadata](docs/openmetadata.md) — containers and CustomStorage, the
   `bio://`-to-FQN mapping, authentication, idempotence and lineage.
+- [Governance evaluation](docs/governance-evaluation.md) — why code decides and
+  AI only explains, READY/REVIEW/BLOCKED, the five checks and the exit codes.
 - [Local OpenMetadata](infra/openmetadata/README.md) — starting and stopping the
   official Docker quickstart, and obtaining a token.
 
@@ -475,6 +564,12 @@ command. The pipeline does not call it, no OpenMetadata `Pipeline`, glossary,
 tag or custom-property entities are created, nothing polls or reconciles, and
 there is no catalogue abstraction layer — an interface with one implementation
 would only be a guess about the second.
+
+Governance evaluation is five checks and a closed enum, not a policy engine.
+There is no Rego, no YAML policy language, no numeric score, no approval
+workflow and no stored history of decisions. Ownership, classification,
+retention, access control and catalogue availability become governance checks
+when this project has real evidence for them, and not before.
 
 ## Licence
 

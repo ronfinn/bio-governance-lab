@@ -2,13 +2,14 @@
 
 ## Scope of this milestone
 
-This repository is at milestone 7: a tested Python foundation, a deterministic
+This repository is at milestone 8: a tested Python foundation, a deterministic
 generator for a small synthetic study, YAML data contracts validated against the
 generated CSVs, study-level data-quality checks over the study as a whole, a
 Nextflow pipeline that runs both as gates in front of curation, OpenLineage
-events recording what a successful run produced, and publication of those
-governed assets into a local OpenMetadata instance. No history is kept, and the
-catalogue is contacted only by an explicit post-run command.
+events recording what a successful run produced, publication of those governed
+assets into a local OpenMetadata instance, and one deterministic
+READY/REVIEW/BLOCKED decision derived from all of that evidence. No history is
+kept, and the catalogue is contacted only by an explicit post-run command.
 
 Everything that follows is designed to be added *on top of* this model rather
 than to replace it.
@@ -39,6 +40,10 @@ src/bio_governance/
     lineage/
         __init__.py        public lineage exports
         openlineage.py     job/dataset identity, START and COMPLETE emission
+    governance/
+        __init__.py        public governance exports
+        models.py          decision, status, check result, report
+        evaluate.py        the five checks over a results directory
     catalog/
         __init__.py        public catalogue exports
         models.py          configuration, asset/edge records, result
@@ -47,7 +52,7 @@ src/bio_governance/
         publish.py         file checks, then service, containers, edges
 contracts/                 the contract definitions themselves (YAML)
 pipelines/nextflow/
-    main.nf                gated curation and lineage workflow (DSL2)
+    main.nf                gated curation, lineage and governance workflow (DSL2)
     nextflow.config        parameters, manifest, error strategy
 infra/openmetadata/
     README.md              starting/stopping the official Docker quickstart
@@ -350,6 +355,75 @@ writes — and its own record types (`Compound`, `Sample`, `StudyMetadata`) foll
 the same frozen-Pydantic conventions. `Asset` itself is untouched: describing a
 row of a CSV is not what it is for.
 
+**Deterministic code decides; AI explains.** The governance decision is computed
+by ordinary Python from files on disk — no clock, no network, no catalogue
+lookup, no randomness and no model — so the same results directory always
+produces the same verdict and anybody can read `evaluate.py` and predict it. A
+later milestone may put a language model in front of a report to explain what
+`lineage_evidence FAIL` means or to draft the note that goes to the study team.
+It will not be able to compute the verdict, because there is nothing to compute
+it *into*. This is the principle the AI-governance milestones are meant to be
+built on, and it is easier to establish before there is a model in the room than
+after.
+
+**The decision is a computed field, which is what makes the rule enforceable.**
+`GovernanceReport.decision` derives from the check statuses every time it is
+read, including during serialization. There is no attribute to assign and no
+constructor argument that takes effect: a caller passing `decision=READY`
+alongside a failing check is ignored, and the report still reads `BLOCKED`. The
+alternative — a stored field and a validator, or a convention that callers are
+expected to honour — would make "code decides" a policy rather than a property.
+
+**Three words, no number.** `READY`, `REVIEW` and `BLOCKED`, derived worst-first
+from the checks. A numeric governance score would need weights nobody agreed on,
+and it would not answer the question: a steward needs to know whether they may
+use the study, not that it scored 0.82. `REVIEW` exists so a finding worth
+recording does not have to choose between blocking a pipeline and staying
+silent.
+
+**Five checks, and a closed enum rather than a policy engine.** The governance
+vocabulary is closed for the same reason the contract rules and the quality
+checks are: every finding has to be a named identifier something downstream can
+act on. No Rego, no rule language, no YAML-defined policies. Five checks do not
+need an engine, and building one before the sixth check exists would be guessing
+at what it needs.
+
+**A check must read real evidence.** Ownership, classification, retention,
+access control and catalogue presence would all be legitimate governance rules,
+and none of them is implemented, because nothing in this project produces
+evidence for any of them yet. A check with nothing to read is a check that
+always passes, which is worse than an absent one: it makes a report look more
+thorough than it is.
+
+**Absent evidence is a verdict, not a crash.** A missing `dq-report.json`, an
+unparseable contract result, a deleted curated file, incoherent lineage — all
+`FAIL`, all `BLOCKED`. These are precisely the situations a governance layer
+exists to catch, and one that raised an exception instead would have failed at
+its job. Exit status 2 is reserved for the single case with no verdict to give:
+the results directory is not there, or is not named for a study, so there is
+nothing to decide *about*.
+
+**Lineage evidence is checked for coherence, not presence.** The events must be
+one START and one COMPLETE sharing a run ID, naming the known job, and naming
+this study's raw inputs and curated outputs. A file that exists but describes
+another run — or another study — would otherwise let the layer certify a curated
+file it cannot actually trace.
+
+**Contract evidence is the existing result model, serialized.** `contract
+validate --json-out` writes the `ContractValidationResult` the validator already
+returns. Inventing a second contract-result model for the pipeline to publish
+would create two descriptions of the same thing that could drift apart; `passed`
+became a computed field on it so the JSON states its own verdict instead of
+leaving a reader to re-derive it from the violation list.
+
+**The governance evaluator is not a second gate.** By the time
+`EVALUATE_GOVERNANCE` runs, the contract and quality gates have already stopped
+everything that would fail a governance check, so a pipeline run that reaches it
+is always `READY`. That is intended. The value is that the verdict becomes a
+first-class artefact that can be re-checked later, against the same directory,
+by somebody who was not there — rather than an inference from the fact that
+Nextflow once exited zero.
+
 ## Deliberate non-goals for now
 
 No repository or service abstraction layer, no plugin system, no configuration
@@ -395,3 +469,9 @@ deliberately not taken. A process in `main.nf` that publishes to a catalogue
 makes a running server part of the pipeline's contract, and that is a decision
 worth making once there is a reason to make it — not as a side effect of the
 integration existing.
+
+
+`GovernanceReport` is the sixth seam, and the one the AI milestones are expected
+to consume. It is a structured verdict with a message per check, serialized
+beside every run, so an explanation layer has something to explain rather than a
+report to parse — and no way to disagree with it.

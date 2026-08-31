@@ -17,7 +17,7 @@ import re
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 #: Contract identifier, e.g. ``bio.samples``.
 CONTRACT_ID_PATTERN = r"^[a-z0-9]+(?:\.[a-z0-9_]+)+$"
@@ -186,6 +186,11 @@ class ContractValidationResult(BaseModel):
     rows_checked: int = Field(ge=0)
     violations: tuple[Violation, ...] = ()
 
+    # The ignore is mypy's limitation, not a loose type: it does not support any
+    # decorator above @property. computed_field is what puts the verdict into
+    # model_dump, so the JSON evidence the governance layer reads states its own
+    # result instead of leaving a reader to re-derive it from the violations.
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def passed(self) -> bool:
         """True when the dataset satisfied every rule in the contract."""

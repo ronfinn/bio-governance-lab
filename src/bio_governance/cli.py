@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from pydantic import BaseModel
 
 from bio_governance import __version__
 from bio_governance.catalog import (
@@ -25,6 +26,12 @@ from bio_governance.contracts import (
     DatasetError,
     load_contract,
     validate_dataset,
+)
+from bio_governance.governance import (
+    GovernanceCheckStatus,
+    GovernanceError,
+    GovernanceReport,
+    evaluate_governance,
 )
 from bio_governance.lineage import (
     LineageError,
@@ -86,6 +93,13 @@ lineage_app = typer.Typer(
 )
 app.add_typer(lineage_app, name="lineage")
 
+governance_app = typer.Typer(
+    name="governance",
+    help="Decide whether a study's evidence makes it ready to use.",
+    no_args_is_help=True,
+)
+app.add_typer(governance_app, name="governance")
+
 catalog_app = typer.Typer(
     name="catalog",
     help="Publish governed assets to a metadata catalogue.",
@@ -131,6 +145,7 @@ def info() -> None:
     typer.echo("YAML data contracts over the generated CSVs: 'bio-gov contract validate'.")
     typer.echo("Study-level data-quality evidence: 'bio-gov dq run'.")
     typer.echo("OpenLineage provenance events for a curation run: 'bio-gov lineage emit'.")
+    typer.echo("Deterministic governance decisions: 'bio-gov governance evaluate'.")
     typer.echo("Publication to a local OpenMetadata: 'bio-gov catalog openmetadata publish'.")
 
 
@@ -227,12 +242,19 @@ def contract_validate(
             help="CSV file to check, e.g. data/raw/BIO-001/samples.csv.",
         ),
     ],
+    json_out: Annotated[
+        Path | None,
+        typer.Option("--json-out", help="Also write the structured result to this path."),
+    ] = None,
 ) -> None:
     """Check a CSV dataset against a YAML data contract.
 
     Exits 0 when the dataset satisfies the contract, 1 when it does not, and 2
     when the contract or the dataset could not be read. Files a contract
     references, such as compounds.csv, are resolved beside the dataset.
+
+    --json-out writes the ContractValidationResult itself, which is the evidence
+    'bio-gov governance evaluate' later reads; the printed report is for people.
     """
     try:
         definition = load_contract(contract)
@@ -241,10 +263,35 @@ def contract_validate(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(ERROR_EXIT_CODE) from exc
 
+    if json_out is not None:
+        _write_json(result, json_out)
+
     for line in _format_result(result):
         typer.echo(line)
+    if json_out is not None:
+        typer.echo(f"\nResult: {json_out}")
     if not result.passed:
         raise typer.Exit(FAIL_EXIT_CODE)
+
+
+def _write_json(document: BaseModel, path: Path) -> None:
+    """Write a report as JSON evidence, before any exit status is decided.
+
+    Every layer writes its evidence the same way and always writes it: a failing
+    run is exactly the one whose evidence somebody will want to read, and the
+    governance layer downstream has nothing to evaluate if a gate withholds its
+    result on the way out.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(document.model_dump(mode="json"), indent=2) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+    except OSError as exc:
+        typer.echo(f"error: cannot write {path}: {exc.strerror or exc}", err=True)
+        raise typer.Exit(ERROR_EXIT_CODE) from exc
 
 
 def _format_result(result: ContractValidationResult) -> list[str]:
@@ -309,18 +356,7 @@ def dq_run(
         raise typer.Exit(ERROR_EXIT_CODE) from exc
 
     if json_out is not None:
-        # Written before the exit status is decided: a failing study is exactly
-        # the one whose evidence somebody will want to read.
-        try:
-            json_out.parent.mkdir(parents=True, exist_ok=True)
-            json_out.write_text(
-                json.dumps(report.model_dump(mode="json"), indent=2) + "\n",
-                encoding="utf-8",
-                newline="\n",
-            )
-        except OSError as exc:
-            typer.echo(f"error: cannot write {json_out}: {exc.strerror or exc}", err=True)
-            raise typer.Exit(ERROR_EXIT_CODE) from exc
+        _write_json(report, json_out)
 
     for line in _format_report(report):
         typer.echo(line)
@@ -409,6 +445,71 @@ def lineage_emit(
     for identifier in emitted.outputs:
         typer.echo(f"  out  {identifier}")
     typer.echo(f"\nLineage: {emitted.output}")
+
+
+@governance_app.command("evaluate")
+def governance_evaluate(
+    results: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            help="Pipeline results directory, e.g. results/BIO-001.",
+        ),
+    ],
+    json_out: Annotated[
+        Path | None,
+        typer.Option("--json-out", help="Also write the structured report to this path."),
+    ] = None,
+) -> None:
+    """Decide whether a study's evidence makes it ready to use.
+
+    Reads the contract results, the quality report, the curated outputs and the
+    OpenLineage events the pipeline left behind, and derives one decision from
+    them: READY, REVIEW or BLOCKED. Nothing here consults a clock, a network or
+    a model — the same evidence always produces the same verdict.
+
+    Exits 0 for READY, 1 for REVIEW or BLOCKED, and 2 only when the results
+    directory itself cannot be read as a study's evidence. Evidence that is
+    missing or incoherent is a governance failure, so it is reported as a FAIL
+    check and a BLOCKED decision rather than as an error.
+    """
+    try:
+        report = evaluate_governance(results)
+    except GovernanceError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(ERROR_EXIT_CODE) from exc
+
+    if json_out is not None:
+        _write_json(report, json_out)
+
+    for line in _format_governance(report):
+        typer.echo(line)
+    if json_out is not None:
+        typer.echo(f"\nReport: {json_out}")
+    if not report.ready:
+        raise typer.Exit(FAIL_EXIT_CODE)
+
+
+def _format_governance(report: GovernanceReport) -> list[str]:
+    """Render a governance report as the lines of the CLI output.
+
+    A passing check prints its name alone, as in the quality report: the message
+    is what a reader needs only when the check has something to say.
+    """
+    lines = [
+        f"Study: {report.study_id}",
+        f"Decision: {report.decision.value.upper()}",
+        "",
+    ]
+    width = max(len(check.check_id.value) for check in report.checks)
+    for check in report.checks:
+        label = f"{check.status.value.upper():<4}  {check.check_id.value}"
+        if check.status is GovernanceCheckStatus.PASS:
+            lines.append(label)
+        else:
+            lines.append(f"{label.ljust(width + 6)}  {check.message}")
+    return lines
 
 
 @openmetadata_app.command("health")
