@@ -29,3 +29,10 @@ results/
 .DS_Store
 .idea/
 .vscode/
+
+# Local OpenMetadata: the official compose file is downloaded, not vendored,
+# and its runtime volumes and any local credentials stay out of the repository.
+infra/openmetadata/docker-compose.yml
+infra/openmetadata/docker-volume/
+.env
+*.jwt

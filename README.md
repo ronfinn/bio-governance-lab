@@ -6,12 +6,13 @@ This repository is a public portfolio project exploring how data governance —
 ownership, classification, lineage, contracts and quality — can be expressed as
 typed, tested, version-controlled code rather than as documents in a wiki.
 
-> **Status: milestone 6 — lineage.** This repository contains the core domain
+> **Status: milestone 7 — catalogue.** This repository contains the core domain
 > model, a deterministic generator for a small synthetic study, YAML data
 > contracts over the generated CSVs, study-level data-quality checks, a Nextflow
-> pipeline that puts both in front of curation as gates, and OpenLineage events
-> recording what a governed run produced. There is no catalogue integration yet.
-> See [Deferred work](#deferred-work).
+> pipeline that puts both in front of curation as gates, OpenLineage events
+> recording what a governed run produced, and publication of those governed
+> assets into a local OpenMetadata instance. See
+> [Deferred work](#deferred-work).
 
 ## What is here today
 
@@ -28,6 +29,8 @@ typed, tested, version-controlled code rather than as documents in a wiki.
   curated directory only by passing both gates.
 - [OpenLineage](https://openlineage.io/) START and COMPLETE events, written as
   local JSONL, recording which raw datasets a curated directory came from.
+- Publication of a study's seven governed assets, and the lineage between
+  them, into a local [OpenMetadata](https://open-metadata.org) instance.
 - A [Typer](https://typer.tiangolo.com/) CLI, `bio-gov`.
 - A full test suite, lint, format and type checks, wired into GitHub Actions.
 
@@ -43,6 +46,16 @@ uv run bio-gov contract validate contracts/samples.v1.yaml data/raw/BIO-001/samp
 uv run bio-gov dq run data/raw/BIO-001
 nextflow run pipelines/nextflow/main.nf
 cat results/BIO-001/lineage/openlineage.jsonl
+```
+
+With a local OpenMetadata running (see
+[infra/openmetadata/](infra/openmetadata/README.md)):
+
+```bash
+export OPENMETADATA_JWT_TOKEN=...
+uv run bio-gov catalog openmetadata health
+uv run bio-gov catalog openmetadata publish data/raw/BIO-001 results/BIO-001
+uv run bio-gov catalog openmetadata get BIO-001
 ```
 
 ## Synthetic data
@@ -300,6 +313,65 @@ The pipeline needs [Nextflow](https://www.nextflow.io/docs/latest/install.html)
 and a Java runtime; nothing else is added to the Python environment. `work/`,
 `results/` and `.nextflow*` are git-ignored.
 
+## The catalogue
+
+`bio-gov catalog openmetadata publish` pushes a study's governed outputs into a
+local OpenMetadata, so the record the earlier milestones produced is
+discoverable by somebody who does not already know this repository exists.
+
+Our assets are generated files, so they are published as **containers** of one
+**storage service** of type `CustomStorage` — not as tables of a database that
+does not exist:
+
+```
+StorageService  bio_governance_lab
+    BIO-001_raw_samples          csv    bio://BIO-001/raw/samples
+    BIO-001_raw_compounds        csv    bio://BIO-001/raw/compounds
+    BIO-001_raw_expression       csv    bio://BIO-001/raw/expression
+    BIO-001_curated_samples      csv    bio://BIO-001/curated/samples
+    BIO-001_curated_compounds    csv    bio://BIO-001/curated/compounds
+    BIO-001_curated_expression   csv    bio://BIO-001/curated/expression
+    BIO-001_quality_dq-report    json   bio://BIO-001/quality/dq-report
+```
+
+The `bio://` identifier is not replaced by an OpenMetadata FQN. The entity name
+is *derived* from it — `bio://BIO-001/raw/samples` → `BIO-001_raw_samples`,
+addressed as `bio_governance_lab.BIO-001_raw_samples` — and the canonical URI is
+carried unchanged in the container's `fullPath`. An FQN says where an entity
+lives in one deployment; `bio://` says what the asset is, everywhere.
+
+Six lineage edges are published, and only edges the project can explain:
+
+```
+raw/samples     ──→ curated/samples      ─┐
+raw/compounds   ──→ curated/compounds     │ CURATE copies each raw file
+raw/expression  ──→ curated/expression   ─┘
+
+raw/samples     ──┐
+raw/compounds   ──┼─→ quality/dq-report    the report judges all three files
+raw/expression  ──┘
+```
+
+Nothing is inferred from the OpenLineage events' full input-output cross
+product; the events are read only for the run ID, which the summary prints.
+
+Every write is a create-or-update `PUT`, so publishing twice updates the same
+seven containers and six edges rather than creating a second set.
+
+| Variable | Default |
+| --- | --- |
+| `OPENMETADATA_HOST` | `http://localhost:8585/api` |
+| `OPENMETADATA_JWT_TOKEN` | — |
+
+A token is never a flag, never committed and never logged; `health` reports only
+that one is set and its last four characters. Publication is an explicit
+post-run command — the pipeline still runs with OpenMetadata switched off.
+
+See [docs/openmetadata.md](docs/openmetadata.md) for the entity mapping, the
+REST-versus-SDK decision and what is deferred, and
+[infra/openmetadata/README.md](infra/openmetadata/README.md) for the local
+Docker deployment.
+
 ## The domain model
 
 ```python
@@ -375,13 +447,17 @@ Nextflow checks its behaviour.
   checks, PASS/WARN/FAIL and the JSON evidence.
 - [Lineage](docs/lineage.md) — why OpenLineage, job/run/dataset, the local JSONL
   transport and what is deferred.
+- [OpenMetadata](docs/openmetadata.md) — containers and CustomStorage, the
+  `bio://`-to-FQN mapping, authentication, idempotence and lineage.
+- [Local OpenMetadata](infra/openmetadata/README.md) — starting and stopping the
+  official Docker quickstart, and obtaining a token.
 
 ## Deferred work
 
-Deliberately **not** implemented in this milestone: OpenMetadata, DataHub,
-Marquez, MCP and AI-agent governance. Each will land as its own milestone on top
-of this foundation. The pipeline is local-execution only — no Kubernetes, no
-cloud executor, no container registry.
+Deliberately **not** implemented in this milestone: DataHub, Marquez, MCP and
+AI-agent governance. Each will land as its own milestone on top of this
+foundation. The pipeline is local-execution only — no Kubernetes, no cloud
+executor, no container registry.
 
 Data quality here is a single run's evidence and a gate that acts on it. There
 is no numeric score, no stored history, no drift detection and no dashboard:
@@ -393,6 +469,12 @@ lineage server, HTTP or Kafka transport, database or catalogue sync; a stopped
 run emits nothing, so failed-run lineage is deferred too. Nextflow's own
 experimental lineage feature is deliberately not mixed in — the provenance here
 is orchestrator-agnostic on purpose.
+
+Catalogue publication is one local OpenMetadata integration and an explicit
+command. The pipeline does not call it, no OpenMetadata `Pipeline`, glossary,
+tag or custom-property entities are created, nothing polls or reconciles, and
+there is no catalogue abstraction layer — an interface with one implementation
+would only be a guess about the second.
 
 ## Licence
 

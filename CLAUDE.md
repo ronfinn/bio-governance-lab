@@ -10,18 +10,23 @@ subject data ever belongs in this repository.
 
 ## Current milestone
 
-Milestone 6: domain models, CLI, tests, CI, deterministic synthetic study
+Milestone 7: domain models, CLI, tests, CI, deterministic synthetic study
 generation, YAML data contracts and contract validation, study-level
-data-quality checks, a Nextflow pipeline that gates curation on both, and
-OpenLineage provenance events for a successful run.
+data-quality checks, a Nextflow pipeline that gates curation on both,
+OpenLineage provenance events for a successful run, and publication of the
+governed assets into a local OpenMetadata instance.
 
-**Not yet implemented, and not to be added without being asked:** OpenMetadata,
-DataHub, Marquez, MCP, AI-agent governance. The pipeline is local-execution
-only: no Kubernetes, Seqera Platform, cloud executor, container registry or DSL2
-module library. Data quality has no history, trends, drift detection,
-thresholds, dashboard or database, and no numeric score. Lineage has no server,
-HTTP or Kafka transport, database, catalogue sync, failed-run events or custom
-facets, and does not use Nextflow's own experimental lineage feature.
+**Not yet implemented, and not to be added without being asked:** DataHub,
+Marquez, MCP, AI-agent governance. The pipeline is local-execution only: no
+Kubernetes, Seqera Platform, cloud executor, container registry or DSL2 module
+library. Data quality has no history, trends, drift detection, thresholds,
+dashboard or database, and no numeric score. Lineage has no server, HTTP or
+Kafka transport, database, failed-run events or custom facets, and does not use
+Nextflow's own experimental lineage feature. The catalogue integration is one
+local OpenMetadata over REST: no `openmetadata-ingestion` SDK, no OpenMetadata
+`Pipeline`, glossary, tag, tier, owner or custom-property entities, no sync
+daemon or reconciliation, no catalogue abstraction interface, and no pipeline
+wiring — publication stays an explicit post-run command.
 
 ## Commands
 
@@ -40,6 +45,12 @@ uv run bio-gov contract validate contracts/samples.v1.yaml data/raw/BIO-001/samp
 # evaluate a whole study for data quality
 uv run bio-gov dq run data/raw/BIO-001
 uv run bio-gov dq run data/raw/BIO-001 --json-out results/BIO-001/quality/dq-report.json
+
+# publish the governed assets to a local OpenMetadata (needs a running server)
+export OPENMETADATA_JWT_TOKEN=...            # never a flag, never committed
+uv run bio-gov catalog openmetadata health
+uv run bio-gov catalog openmetadata publish data/raw/BIO-001 results/BIO-001
+uv run bio-gov catalog openmetadata get BIO-001
 
 # emit OpenLineage provenance for a curation run
 uv run bio-gov lineage emit data/raw/BIO-001 results/BIO-001/curated \
@@ -71,17 +82,26 @@ all four before committing.
 - `src/bio_governance/lineage/` — `openlineage.py` holds the job, dataset and
   run identities and `emit_curation_lineage`. Export new public names from
   `lineage/__init__.py`.
+- `src/bio_governance/catalog/` — `models.py` for the configuration and result
+  models, `mapping.py` for the `bio://`-to-OpenMetadata mapping (no IO, no
+  HTTP), `client.py` for the REST client, `publish.py` for orchestration.
+  Export new public names from `catalog/__init__.py`.
 - `contracts/` — the contract definitions themselves, as YAML. Committed.
 - `pipelines/nextflow/` — `main.nf` holds the DSL2 workflow, `nextflow.config`
   its parameters and manifest. Nothing else belongs here.
 - `src/bio_governance/cli.py` — the `bio-gov` Typer app. The `demo` sub-app
   hosts generation commands, the `contract` sub-app hosts validation, the `dq`
-  sub-app hosts quality evaluation, and the `lineage` sub-app hosts emission.
+  sub-app hosts quality evaluation, the `lineage` sub-app hosts emission, and
+  `catalog openmetadata` hosts `health`, `publish` and `get`.
+- `infra/openmetadata/` — the README for the official local Docker quickstart,
+  and nothing else. The compose file is downloaded, not vendored, and it and its
+  `docker-volume/` are git-ignored.
 - `tests/` — mirrors the source modules. Shared fixtures live in `conftest.py`.
 - `docs/` — `architecture.md` (decisions), `governance-model.md` (meaning),
   `synthetic-data.md` (the generated study), `data-contracts.md` (the contract
   format and validation), `data-quality.md` (the checks and the evidence),
-  `lineage.md` (OpenLineage job, run, datasets and transport).
+  `lineage.md` (OpenLineage job, run, datasets and transport),
+  `openmetadata.md` (containers, identity mapping, auth, idempotence, lineage).
 - `data/` — generated output. Git-ignored; never commit generated data.
 - `results/` — pipeline output. Git-ignored, like `work/` and `.nextflow*`.
 
@@ -178,6 +198,33 @@ all four before committing.
   `onComplete` handler, or an `errorStrategy` change to work around it.
 - **Nextflow is not a Python dependency.** It is installed separately and CI does
   not install it.
+- **The catalogue is published to over REST, not through the SDK.**
+  `openmetadata-ingestion` resolves to around 130 transitive packages for five
+  kinds of request. Use `httpx` against the documented endpoints.
+- **Storage service and containers, and never a false service type.** Our assets
+  are generated files, so they are containers of one `CustomStorage` storage
+  service. Registering them as MySQL, PostgreSQL or Snowflake would put a false
+  statement in the catalogue.
+- **`bio://` identity is not replaced by an OpenMetadata FQN.** The entity name
+  is derived from the identifier one-way, and the canonical URI is carried
+  unchanged in the container's `fullPath`. An FQN is scoped to one deployment;
+  `bio://` is not.
+- **Every catalogue write is a create-or-update `PUT`.** Idempotence is a
+  property of the requests, not of bookkeeping. Do not add a read-then-decide
+  step or a local record of what was published.
+- **Only lineage edges that can be explained in a sentence.** Six per study: each
+  raw file to its curated copy, and all three raw files to the quality report.
+  Do not derive edges from an OpenLineage event's input-output cross product.
+- **Provenance is only claimed for files that exist**, as in the lineage layer:
+  every file a container will name is checked before the first request, so a
+  failed publication leaves nothing half-catalogued.
+- **A token is configuration, never an argument.** Read `OPENMETADATA_HOST` and
+  `OPENMETADATA_JWT_TOKEN` from the environment. Never hard-code, commit, log or
+  echo a token — `token_hint` is the only thing that may be printed. `health` is
+  answerable without one; every write demands one and the error names the
+  variable.
+- **The pipeline must run with OpenMetadata offline.** Publication is an explicit
+  post-run command, not a process in `main.nf`.
 - Line length is 100. Ruff owns formatting.
 
 ## Testing
@@ -209,6 +256,16 @@ two events, START then COMPLETE, one shared run ID, the job identity, the
 producer, and the raw and curated dataset names. An explicit `run_id` is how a
 test asserts on a known value. The CLI gets a test writing a real JSONL file and
 one proving a missing source file exits 2.
+
+Catalogue tests mock HTTP with `respx` and must never need a server: CI does
+not start OpenMetadata. A fake server keys entities the way the real one does, so
+a duplicate shows up as a second entry rather than an overwrite. Assert on the
+configuration defaults, the clear error when a token is missing, the entity-name
+mapping, the seven prepared assets, the preserved `bio://` identity, the file
+formats, the six-edge set, useful messages for connection and token failures,
+and that a second publication sends the same requests as the first. The live
+demonstration lives in `tests/test_catalog_live.py` and skips unless
+`OPENMETADATA_INTEGRATION_TEST=1`.
 
 Contract tests load the real YAML from `contracts/` rather than inline
 definitions, so the shipped contracts are what is under test. Every `--inject-*`
