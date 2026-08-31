@@ -134,3 +134,22 @@ def build_results(tmp_path: Path) -> Path:
         str(results / "lineage" / "openlineage.jsonl"),
     )
     return results
+
+
+def build_governance_report(results: Path) -> Path:
+    """Write the governance report ``EVALUATE_GOVERNANCE`` leaves in a results directory.
+
+    ``build_results`` deliberately stops short of this: the governance tests are
+    about producing a decision, so they call the evaluator themselves. The MCP
+    tests are about *reading one back*, and there is nothing to read until the
+    same command ``main.nf`` runs has written it.
+
+    The exit status is the verdict, so 1 is as valid an outcome as 0 here — a
+    BLOCKED study still has a report. 2 would mean no verdict was possible.
+    """
+    path = results / "governance" / "governance-report.json"
+    outcome = CliRunner().invoke(
+        app, ["governance", "evaluate", str(results), "--json-out", str(path)]
+    )
+    assert outcome.exit_code in (0, 1), outcome.output
+    return path

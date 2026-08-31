@@ -2,14 +2,16 @@
 
 ## Scope of this milestone
 
-This repository is at milestone 8: a tested Python foundation, a deterministic
+This repository is at milestone 9: a tested Python foundation, a deterministic
 generator for a small synthetic study, YAML data contracts validated against the
 generated CSVs, study-level data-quality checks over the study as a whole, a
 Nextflow pipeline that runs both as gates in front of curation, OpenLineage
 events recording what a successful run produced, publication of those governed
-assets into a local OpenMetadata instance, and one deterministic
-READY/REVIEW/BLOCKED decision derived from all of that evidence. No history is
-kept, and the catalogue is contacted only by an explicit post-run command.
+assets into a local OpenMetadata instance, one deterministic
+READY/REVIEW/BLOCKED decision derived from all of that evidence, and a read-only
+Model Context Protocol server exposing that evidence to an AI client. No history
+is kept, the catalogue is contacted only by an explicit post-run command, and
+the MCP server reads local files and nothing else.
 
 Everything that follows is designed to be added *on top of* this model rather
 than to replace it.
@@ -50,6 +52,10 @@ src/bio_governance/
         mapping.py         bio:// -> OpenMetadata entities (no IO, no HTTP)
         client.py          the OpenMetadata REST client
         publish.py         file checks, then service, containers, edges
+    mcp/
+        __init__.py        public MCP exports
+        evidence.py        reading the results root (no MCP import)
+        server.py          the read-only tools, resources and annotations
 contracts/                 the contract definitions themselves (YAML)
 pipelines/nextflow/
     main.nf                gated curation, lineage and governance workflow (DSL2)
@@ -424,6 +430,58 @@ first-class artefact that can be re-checked later, against the same directory,
 by somebody who was not there — rather than an inference from the fact that
 Nextflow once exited zero.
 
+**The MCP server reads; it does not decide, and cannot.** Milestone 9 is the
+one where the principle above stops being a design note and becomes an interface
+contract, because it is the first time something that is not a person is given a
+door into the governance evidence. Six tools, every one a reader, every one
+annotated `readOnlyHint`. Nothing computes a decision, overrides one, approves
+an asset, edits a report, emits lineage, publishes to a catalogue or writes a
+file.
+
+**And the guarantee does not rest on the tool list.** A tool list is a promise
+about what was built, and a promise is not an architecture. What makes this
+enforceable is that `get_governance_report` deserializes
+`governance-report.json` into `GovernanceReport`, whose `decision` is a computed
+field — so the `"decision"` the file carries is never read. Edit the file to
+claim `READY` beside a failing check and the server still answers `BLOCKED`. The
+same property that stopped a careless caller in milestone 8 stops a model here,
+and for the same reason.
+
+**`why_not_ready` is a partition, not an explanation.** It sorts a report's own
+checks by the statuses they already carry: `FAIL` into `blocking`, `WARN` into
+`review`. It calls no model, applies no heuristic and invents no finding, so it
+is as deterministic as the report it reads. The prose an assistant writes on top
+of it is the part a model is actually for, and it is written outside this
+repository.
+
+**The results root is the boundary, and a study ID is an identifier.** A
+`study_id` arrives from a client, so it is validated as an `AssetIdentifier`
+domain before it is joined to a path at all — the pattern admits no separator to
+traverse with, so `../etc`, `/etc/passwd` and `BIO-001/../../data` are refused by
+the convention the whole project already uses rather than by a filter over
+strings. The resolved path is then required to still be inside the root, so a
+symlink cannot do what a string could not, and there is no `read_file` tool: the
+server names every file it opens.
+
+**The root is a parameter, not a global.** `build_server(results_root)` closes
+over the directory, so no client and no tool can point the server elsewhere.
+That is also why there is no module-level server object for `mcp dev` to import;
+the Inspector wraps `bio-gov mcp serve` as a command instead.
+
+**stdio, and nothing else.** It is what a local MCP host launches a server with,
+and it needs no port, certificate or account. An HTTP transport would mean
+authentication, and authentication over synthetic data would be theatre.
+
+**Evidence reading is separate from the protocol.** `evidence.py` is ordinary
+Python over ordinary files and imports nothing from the MCP SDK; `server.py` is
+the protocol surface. It is the same split the project makes everywhere between
+what something *is* and how it is transported, and it means the readers are
+testable without a client.
+
+**The MCP SDK is imported lazily by the CLI.** It costs about a second to
+import, and every other `bio-gov` command — including the six the pipeline
+shells out to on every run — would otherwise pay that for nothing.
+
 ## Deliberate non-goals for now
 
 No repository or service abstraction layer, no plugin system, no configuration
@@ -435,10 +493,15 @@ catalogue is what would justify extracting one, and the reusable part —
 
 ## Where this is heading
 
-Later milestones will add DataHub, followed by MCP and AI-agent governance. Each
-of those is expected to consume the `Asset` model rather than define its own, and
-to run against the synthetic study — including the deliberately broken versions
-of it.
+Later milestones will add DataHub, and AI-agent governance in the sense of an
+agent that *acts* rather than reads. Each of those is expected to consume the
+`Asset` model rather than define its own, and to run against the synthetic study
+— including the deliberately broken versions of it.
+
+If an assistant is ever to ask for something — a re-run, a review, a note
+against a study — it will be a request into a queue that a person or a
+deterministic process acts on, never a tool that mutates a report. The MCP
+server's read-only boundary is the shape that milestone has to fit around.
 
 `ContractValidationResult` is the seam those milestones are expected to use. It
 is a structured object, not printed text, so emitting a quality event or setting
@@ -457,6 +520,12 @@ terms.
 `openlineage.jsonl` is the fourth, and milestone 7 used it as one: the catalogue
 reads the run ID off disk rather than re-deriving what the pipeline did. A
 DataHub integration has the same file available on the same terms.
+
+`GovernanceReport` is the fifth, and milestone 9 used it as one: the MCP server
+deserializes the evaluator's own JSON rather than restating what a decision
+means. Anything else that wants to report a verdict — a notification, a badge, a
+second protocol — should read the same file into the same model, and inherit the
+same guarantee for free.
 
 `catalog/mapping.py` is the fifth. It decides what a study looks like in a
 catalogue without performing IO or speaking HTTP, so a second catalogue is a

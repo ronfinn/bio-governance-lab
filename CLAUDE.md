@@ -10,15 +10,16 @@ subject data ever belongs in this repository.
 
 ## Current milestone
 
-Milestone 8: domain models, CLI, tests, CI, deterministic synthetic study
+Milestone 9: domain models, CLI, tests, CI, deterministic synthetic study
 generation, YAML data contracts and contract validation, study-level
 data-quality checks, a Nextflow pipeline that gates curation on both,
 OpenLineage provenance events for a successful run, publication of the governed
-assets into a local OpenMetadata instance, and one deterministic
-READY/REVIEW/BLOCKED governance decision derived from that evidence.
+assets into a local OpenMetadata instance, one deterministic
+READY/REVIEW/BLOCKED governance decision derived from that evidence, and a
+read-only MCP server exposing that evidence to an AI client.
 
 **Not yet implemented, and not to be added without being asked:** DataHub,
-Marquez, MCP, AI-agent governance. The pipeline is local-execution only: no
+Marquez, AI-agent governance in the sense of an agent that acts. The pipeline is local-execution only: no
 Kubernetes, Seqera Platform, cloud executor, container registry or DSL2 module
 library. Data quality has no history, trends, drift detection, thresholds,
 dashboard or database, and no numeric score. Lineage has no server, HTTP or
@@ -27,7 +28,10 @@ Nextflow's own experimental lineage feature. The catalogue integration is one
 local OpenMetadata over REST: no `openmetadata-ingestion` SDK, no OpenMetadata
 `Pipeline`, glossary, tag, tier, owner or custom-property entities, no sync
 daemon or reconciliation, no catalogue abstraction interface, and no pipeline
-wiring — publication stays an explicit post-run command.
+wiring — publication stays an explicit post-run command. The MCP server is
+read-only, local and stdio-only: no HTTP or SSE transport, no authentication,
+OAuth, reverse proxy or container, no prompts, no catalogue search, no
+`read_file` tool, and no tool that writes anything at all.
 
 ## Commands
 
@@ -59,6 +63,11 @@ uv run bio-gov catalog openmetadata get BIO-001
 uv run bio-gov governance evaluate results/BIO-001
 uv run bio-gov governance evaluate results/BIO-001 \
   --json-out results/BIO-001/governance/governance-report.json
+
+# serve that evidence to an MCP client over stdio
+uv run bio-gov mcp serve
+uv run bio-gov mcp serve --results-root results
+npx @modelcontextprotocol/inspector uv run bio-gov mcp serve   # needs Node
 
 # emit OpenLineage provenance for a curation run
 uv run bio-gov lineage emit data/raw/BIO-001 results/BIO-001/curated \
@@ -93,6 +102,9 @@ all four before committing.
 - `src/bio_governance/governance/` — `models.py` for the decision, status,
   check and report models, `evaluate.py` for the five checks over a results
   directory. Export new public names from `governance/__init__.py`.
+- `src/bio_governance/mcp/` — `evidence.py` for reading the results root (no
+  MCP import anywhere in it), `server.py` for the tools, resources and
+  read-only annotations. Export new public names from `mcp/__init__.py`.
 - `src/bio_governance/catalog/` — `models.py` for the configuration and result
   models, `mapping.py` for the `bio://`-to-OpenMetadata mapping (no IO, no
   HTTP), `client.py` for the REST client, `publish.py` for orchestration.
@@ -103,7 +115,8 @@ all four before committing.
 - `src/bio_governance/cli.py` — the `bio-gov` Typer app. The `demo` sub-app
   hosts generation commands, the `contract` sub-app hosts validation, the `dq`
   sub-app hosts quality evaluation, the `lineage` sub-app hosts emission, and
-  `catalog openmetadata` hosts `health`, `publish` and `get`.
+  `catalog openmetadata` hosts `health`, `publish` and `get`, and the `mcp`
+  sub-app hosts `serve`.
 - `infra/openmetadata/` — the README for the official local Docker quickstart,
   and nothing else. The compose file is downloaded, not vendored, and it and its
   `docker-volume/` are git-ignored.
@@ -113,7 +126,9 @@ all four before committing.
   format and validation), `data-quality.md` (the checks and the evidence),
   `lineage.md` (OpenLineage job, run, datasets and transport),
   `openmetadata.md` (containers, identity mapping, auth, idempotence, lineage),
-  `governance-evaluation.md` (the decision model, the five checks, exit codes).
+  `governance-evaluation.md` (the decision model, the five checks, exit codes),
+  `mcp-server.md` (the read-only boundary, the tools and resources, stdio,
+  the Inspector, results-root confinement).
 - `data/` — generated output. Git-ignored; never commit generated data.
 - `results/` — pipeline output. Git-ignored, like `work/` and `.nextflow*`.
 
@@ -263,6 +278,33 @@ all four before committing.
 - **The contract JSON is the existing `ContractValidationResult`.** No second
   contract-result model; `passed` is a computed field so the evidence states its
   own verdict.
+- **The MCP server exposes evidence; it never produces any.** No tool computes
+  a governance decision, overrides one, approves an asset, edits a report,
+  emits lineage, publishes to a catalogue or writes a file. Every tool carries
+  `ToolAnnotations(read_only_hint=True)`, and the milestone's guarantee is that
+  it stays that way.
+- **Evidence is deserialized into the model that produced it**, never passed
+  through as JSON. `GovernanceReport.decision` is a computed field, so a report
+  whose file claims `READY` beside a failing check still reads `BLOCKED`. That
+  is what makes "deterministic code decides" a property rather than a promise,
+  and it is why no MCP tool may return a raw document.
+- **`why_not_ready` partitions; it does not explain.** It sorts the report's own
+  checks by the statuses they already carry. No model is called, no finding is
+  inferred, and the same study always gives the same answer.
+- **The results root is the boundary, and a study ID is an identifier.** A
+  client-supplied `study_id` is validated through `AssetIdentifier` before it is
+  joined to a path, and the resolved path is required to stay inside the root.
+  Never add a tool that takes a file name, a path or a directory.
+- **The results root is a parameter of `build_server()`, not a global.** No
+  client and no tool may point the server at another directory, which is also
+  why there is no module-level server object for `mcp dev` to import.
+- **Ordinary evidence problems are `ToolError`, not tracebacks.** A missing
+  report is the normal state of a repository whose run may have stopped at a
+  gate. `EvidenceError` carries the sentence; the SDK turns it into an error
+  result and one log line.
+- **The MCP SDK is imported lazily in the CLI.** It costs about a second, and
+  every other `bio-gov` command — including the six the pipeline shells out to
+  on every run — would otherwise pay it for nothing.
 - Line length is 100. Ruff owns formatting.
 
 ## Testing
@@ -312,6 +354,18 @@ hand-author an evidence file into the shape the evaluator hopes to find, and do
 not change the generator to manufacture a warning — edit the quality report. The
 decision tests prove derivation directly: a report handed `decision=READY`
 alongside a failing check still reads `BLOCKED`.
+
+MCP tests run through the SDK's in-memory `Client`, which speaks the protocol
+directly to an `MCPServer` object in the same process: no subprocess, no host
+application and no external service, so CI needs nothing extra. The evidence is
+produced, never hand-written — `build_governance_report` in `conftest.py` runs
+the evaluator over what `build_results` left, exactly as `EVALUATE_GOVERNANCE`
+does — and a test then damages one piece of it. Two tests carry the milestone's
+claim: every exposed tool is annotated read-only and none is named for a write,
+and a report whose JSON has been edited to claim `READY` is still served as
+`BLOCKED`. Path traversal is tested as a parametrized set of the forms a client
+might send, and a symlink out of the results root gets its own test, because the
+identifier check and the confinement check are two different lines.
 
 Contract tests load the real YAML from `contracts/` rather than inline
 definitions, so the shipped contracts are what is under test. Every `--inject-*`
