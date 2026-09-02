@@ -2,16 +2,16 @@
 
 ## Scope of this milestone
 
-This repository is at milestone 9: a tested Python foundation, a deterministic
+This repository is at milestone 10: a tested Python foundation, a deterministic
 generator for a small synthetic study, YAML data contracts validated against the
 generated CSVs, study-level data-quality checks over the study as a whole, a
 Nextflow pipeline that runs both as gates in front of curation, OpenLineage
 events recording what a successful run produced, publication of those governed
-assets into a local OpenMetadata instance, one deterministic
-READY/REVIEW/BLOCKED decision derived from all of that evidence, and a read-only
-Model Context Protocol server exposing that evidence to an AI client. No history
-is kept, the catalogue is contacted only by an explicit post-run command, and
-the MCP server reads local files and nothing else.
+assets into a local OpenMetadata instance *and* into a local DataHub, one
+deterministic READY/REVIEW/BLOCKED decision derived from all of that evidence,
+and a read-only Model Context Protocol server exposing that evidence to an AI
+client. No history is kept, either catalogue is contacted only by an explicit
+post-run command, and the MCP server reads local files and nothing else.
 
 Everything that follows is designed to be added *on top of* this model rather
 than to replace it.
@@ -52,6 +52,9 @@ src/bio_governance/
         mapping.py         bio:// -> OpenMetadata entities (no IO, no HTTP)
         client.py          the OpenMetadata REST client
         publish.py         file checks, then service, containers, edges
+        datahub_mapping.py bio:// -> DataHub URNs and aspects (no IO, no SDK)
+        datahub_client.py  the DataHub SDK boundary: proposals and reads
+        datahub_publish.py the same file checks, then platform, datasets, lineage
     mcp/
         __init__.py        public MCP exports
         evidence.py        reading the results root (no MCP import)
@@ -62,6 +65,8 @@ pipelines/nextflow/
     nextflow.config        parameters, manifest, error strategy
 infra/openmetadata/
     README.md              starting/stopping the official Docker quickstart
+infra/datahub/
+    README.md              starting/stopping the official DataHub quickstart
 tests/                     pytest suite
 data/                      generated output (git-ignored)
 results/                   pipeline output (git-ignored)
@@ -480,21 +485,40 @@ testable without a client.
 
 **The MCP SDK is imported lazily by the CLI.** It costs about a second to
 import, and every other `bio-gov` command — including the six the pipeline
-shells out to on every run — would otherwise pay that for nothing.
+shells out to on every run — would otherwise pay that for nothing. The DataHub
+SDK is imported lazily for the same reason, at about half a second.
+
+**The SDK decision is made per catalogue, not once.** OpenMetadata is published
+to over REST because its SDK costs around 130 transitive packages to send four
+readable JSON bodies. DataHub is published to *through* its SDK because its
+write model is a Metadata Change Proposal carrying an Avro-generated aspect —
+hand-rolling that would mean maintaining a copy of a schema the SDK already
+holds — and `acryl-datahub` costs about 60 packages, none of them a dbt or a
+Kubernetes client. Two integrations, two answers, each argued from what that
+catalogue's API actually is.
+
+**Both catalogues, and still no catalogue interface.** Milestone 10 added the
+second implementation, which is exactly the point at which an abstraction is
+usually extracted, and it was not. The two publications share what genuinely
+overlaps — the models, and the code that checks which files exist — and differ
+everywhere the catalogues differ: entity model, identity, aspects versus
+entities, one edge per request versus one aspect per downstream dataset. An
+interface over that would have to hide those differences, and comparing them is
+the next milestone's whole subject. It is easier to extract an interface from
+two working implementations later than to recover a difference an interface has
+already flattened.
 
 ## Deliberate non-goals for now
 
 No repository or service abstraction layer, no plugin system, no configuration
-framework, and no base classes beyond Pydantic's. Milestone 7 was the first real
-external integration and did not need any of them: the OpenMetadata client is a
-concrete client, not an implementation of a catalogue interface. A second
-catalogue is what would justify extracting one, and the reusable part —
-`catalog/mapping.py` — is already separate from the transport.
+framework, and no base classes beyond Pydantic's. Two catalogue integrations now
+sit side by side as concrete clients rather than as implementations of a
+`CatalogAdapter`, for the reason above.
 
 ## Where this is heading
 
-Later milestones will add DataHub, and AI-agent governance in the sense of an
-agent that *acts* rather than reads. Each of those is expected to consume the
+Later milestones will compare the two catalogue integrations, and add AI-agent
+governance in the sense of an agent that *acts* rather than reads. Each of those is expected to consume the
 `Asset` model rather than define its own, and to run against the synthetic study
 — including the deliberately broken versions of it.
 
@@ -518,8 +542,9 @@ catalogue milestone has a producer of curated assets to register on the same
 terms.
 
 `openlineage.jsonl` is the fourth, and milestone 7 used it as one: the catalogue
-reads the run ID off disk rather than re-deriving what the pipeline did. A
-DataHub integration has the same file available on the same terms.
+reads the run ID off disk rather than re-deriving what the pipeline did.
+Milestone 10 used it on exactly the same terms from the DataHub side, which is
+what a seam is supposed to make unremarkable.
 
 `GovernanceReport` is the fifth, and milestone 9 used it as one: the MCP server
 deserializes the evaluator's own JSON rather than restating what a decision
@@ -527,11 +552,14 @@ means. Anything else that wants to report a verdict — a notification, a badge,
 second protocol — should read the same file into the same model, and inherit the
 same guarantee for free.
 
-`catalog/mapping.py` is the fifth. It decides what a study looks like in a
-catalogue without performing IO or speaking HTTP, so a second catalogue is a
-second client rather than a second opinion about what the assets are. No
-abstraction was extracted for it: an interface with one implementation is a guess
-about the second, and the mapping is already the shared part.
+`catalog/mapping.py` is the fifth, and the DataHub milestone is the test it
+passed. It decides what a study looks like in a catalogue without performing IO
+or speaking HTTP, so the second catalogue turned out to be a second client and a
+second identity mapping rather than a second opinion about which assets exist:
+`datahub_mapping.py` imports `prepare_assets` and `lineage_edges` rather than
+restating them. Two catalogues that disagreed about the seven assets would not
+be comparable, and a second copy of that list is exactly how the disagreement
+would have arrived.
 
 Wiring publication into the pipeline is the obvious next step and was
 deliberately not taken. A process in `main.nf` that publishes to a catalogue
