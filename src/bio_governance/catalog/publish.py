@@ -15,6 +15,12 @@ not actually there, and then puts the two together.
 The order matters. The service must exist before its containers, and the
 containers must exist before an edge between them, because OpenMetadata's
 lineage API works in entity IDs.
+
+The four public helpers below — which study this is, which files it consists of,
+which run produced them and which contracts describe them — are shared with
+:mod:`bio_governance.catalog.datahub_publish`. Which files exist is a fact about
+the study, not about a catalogue, and two catalogues that answered it separately
+would eventually answer it differently.
 """
 
 from __future__ import annotations
@@ -66,14 +72,14 @@ def publish_study(
     container and the lineage routes are create-or-update, so a second run
     leaves seven containers and six edges, not fourteen and twelve.
     """
-    study_id = _study_id(raw_dir)
-    sizes = _sizes(study_id, raw_dir, results_dir)
-    run_id = _lineage_run_id(results_dir / LINEAGE_EVENTS)
+    study_id = study_id_from(raw_dir)
+    sizes = asset_sizes(study_id, raw_dir, results_dir)
+    run_id = lineage_run_id(results_dir / LINEAGE_EVENTS)
 
     assets = prepare_assets(
         study_id,
         sizes=sizes,
-        contracts=_contracts(contract_dir or DEFAULT_CONTRACT_DIR),
+        contracts=load_contracts(contract_dir or DEFAULT_CONTRACT_DIR),
     )
     edges = lineage_edges(study_id)
 
@@ -99,8 +105,13 @@ def publish_study(
     )
 
 
-def _study_id(raw_dir: Path) -> str:
-    """Take the study identifier from the raw directory's name, as lineage does."""
+def study_id_from(raw_dir: Path) -> str:
+    """Take the study identifier from the raw directory's name, as lineage does.
+
+    Public because the DataHub publication reads the same evidence from the
+    same directories. Which files a study consists of, and whether they are
+    there, is a fact about the study rather than about either catalogue.
+    """
     if not raw_dir.is_dir():
         raise CatalogError(f"raw study directory not found: {raw_dir}")
     study_id = raw_dir.resolve().name
@@ -111,7 +122,7 @@ def _study_id(raw_dir: Path) -> str:
     return study_id
 
 
-def _sizes(study_id: str, raw_dir: Path, results_dir: Path) -> dict[str, int]:
+def asset_sizes(study_id: str, raw_dir: Path, results_dir: Path) -> dict[str, int]:
     """The byte size of every file the catalogue is about to claim exists.
 
     Doubles as the existence check: a missing file raises here, before a single
@@ -137,7 +148,7 @@ def _size(path: Path, label: str) -> int:
     return path.stat().st_size
 
 
-def _lineage_run_id(events: Path) -> str | None:
+def lineage_run_id(events: Path) -> str | None:
     """The OpenLineage run ID behind these outputs, when the evidence is there.
 
     The events file is provenance the catalogue *reports*, not provenance it
@@ -160,7 +171,7 @@ def _lineage_run_id(events: Path) -> str | None:
     return None
 
 
-def _contracts(contract_dir: Path) -> dict[str, DataContract]:
+def load_contracts(contract_dir: Path) -> dict[str, DataContract]:
     """Load the shipped contracts whose columns become container data models.
 
     A contract that is not there is not an error. The catalogue's job is to

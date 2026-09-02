@@ -14,6 +14,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "acryl-datahub>=1.7",
     "httpx>=0.28",
     "mcp>=2.1",
     "openlineage-python>=1.52",
@@ -56,6 +57,12 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 python_version = "3.11"
 strict = true
 files = ["src"]
+# DataHub's metadata model is code-generated from Avro schemas, and some of the
+# generated constructors carry no annotations at all, so strict mode reads
+# ``StringTypeClass()`` as an untyped call. The exemption is for calls into that
+# one package; strictness is not relaxed anywhere else, and src carries no
+# ``type: ignore`` for it.
+untyped_calls_exclude = ["datahub"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

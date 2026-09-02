@@ -179,6 +179,10 @@ still at entity version `0.1`, and `raw/samples` has two downstream edges.
 
 ## REST, not the SDK
 
+(The DataHub integration added in milestone 10 goes the other way and uses
+that project's SDK. The two decisions are argued from what each API actually
+is — see [datahub.md](datahub.md).)
+
 OpenMetadata ships an official Python SDK, `openmetadata-ingestion`. This
 project does not use it. Resolving it for this environment pulls in around 130
 transitive packages — dbt-core, boto3, grpcio, numpy and the Kubernetes client

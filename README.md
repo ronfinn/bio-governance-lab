@@ -6,15 +6,15 @@ This repository is a public portfolio project exploring how data governance —
 ownership, classification, lineage, contracts and quality — can be expressed as
 typed, tested, version-controlled code rather than as documents in a wiki.
 
-> **Status: milestone 9 — read-only MCP governance server.** This repository
+> **Status: milestone 10 — DataHub catalogue integration.** This repository
 > contains the core domain model, a deterministic generator for a small
 > synthetic study, YAML data contracts over the generated CSVs, study-level
 > data-quality checks, a Nextflow pipeline that puts both in front of curation
 > as gates, OpenLineage events recording what a governed run produced,
-> publication of those governed assets into a local OpenMetadata instance, one
-> deterministic READY/REVIEW/BLOCKED decision derived from all of that evidence,
-> and a Model Context Protocol server that lets an AI assistant read that
-> decision without any way to change it. See
+> publication of those governed assets into a local OpenMetadata instance and
+> into a local DataHub, one deterministic READY/REVIEW/BLOCKED decision derived
+> from all of that evidence, and a Model Context Protocol server that lets an AI
+> assistant read that decision without any way to change it. See
 > [Deferred work](#deferred-work).
 
 ## What is here today
@@ -34,6 +34,9 @@ typed, tested, version-controlled code rather than as documents in a wiki.
   local JSONL, recording which raw datasets a curated directory came from.
 - Publication of a study's seven governed assets, and the lineage between
   them, into a local [OpenMetadata](https://open-metadata.org) instance.
+- The same seven assets and six edges published into a local
+  [DataHub](https://datahubproject.io) — a second catalogue, modelled DataHub's
+  way rather than OpenMetadata's, and deliberately not behind an interface.
 - One deterministic governance decision — READY, REVIEW or BLOCKED — derived
   from five checks over that evidence. Code decides; a model may only explain.
 - A read-only [MCP](https://modelcontextprotocol.io) server exposing that
@@ -66,6 +69,15 @@ export OPENMETADATA_JWT_TOKEN=...
 uv run bio-gov catalog openmetadata health
 uv run bio-gov catalog openmetadata publish data/raw/BIO-001 results/BIO-001
 uv run bio-gov catalog openmetadata get BIO-001
+```
+
+Or with a local DataHub (see [infra/datahub/](infra/datahub/README.md)) — the
+same seven assets and six edges, in the other catalogue:
+
+```bash
+uv run bio-gov catalog datahub health
+uv run bio-gov catalog datahub publish data/raw/BIO-001 results/BIO-001
+uv run bio-gov catalog datahub get BIO-001
 ```
 
 ## Synthetic data
@@ -392,6 +404,66 @@ REST-versus-SDK decision and what is deferred, and
 [infra/openmetadata/README.md](infra/openmetadata/README.md) for the local
 Docker deployment.
 
+## The second catalogue
+
+`bio-gov catalog datahub publish` sends the same seven assets and the same six
+edges to a local DataHub. Two catalogues, publishing the same governance
+evidence, so the next milestone can compare *catalogues* rather than two
+different studies.
+
+DataHub has no storage service and no container — anything with fields is a
+**Dataset**, belonging to a **data platform** and an environment — so the same
+files are modelled its way rather than made to imitate OpenMetadata:
+
+```
+DataPlatform  urn:li:dataPlatform:bio_governance_lab
+    BIO-001.raw.samples          csv    Raw File         bio://BIO-001/raw/samples
+    BIO-001.raw.compounds        csv    Raw File         bio://BIO-001/raw/compounds
+    BIO-001.raw.expression       csv    Raw File         bio://BIO-001/raw/expression
+    BIO-001.curated.samples      csv    Curated File     bio://BIO-001/curated/samples
+    BIO-001.curated.compounds    csv    Curated File     bio://BIO-001/curated/compounds
+    BIO-001.curated.expression   csv    Curated File     bio://BIO-001/curated/expression
+    BIO-001.quality.dq-report    json   Quality Report   bio://BIO-001/quality/dq-report
+```
+
+| | OpenMetadata | DataHub |
+| --- | --- | --- |
+| the container | `StorageService` → `Container` | `DataPlatform` → `Dataset` |
+| the unit of a write | an entity, `PUT` whole | an **aspect**, proposed |
+| the address | FQN, assigned by the server | URN, derived by the client |
+| our identity lives in | `fullPath` | `qualifiedName` and a custom property |
+| lineage | one `PUT` per edge, in entity IDs | one aspect per downstream dataset |
+
+The identity rule does not change: `bio://` is the project's identity and a
+catalogue's address is that catalogue's. `bio://BIO-001/raw/samples` derives
+*down* into the dataset name `BIO-001.raw.samples`, addressed as
+`urn:li:dataset:(urn:li:dataPlatform:bio_governance_lab,BIO-001.raw.samples,PROD)`,
+and the canonical URI comes back unchanged in `qualifiedName` and in a
+`canonical_asset_id` property.
+
+Six edges arrive as four aspects, because DataHub's `upstreamLineage` aspect is
+the whole upstream list of one dataset rather than one edge — so the quality
+report's three raw inputs must be sent together. Publishing twice leaves seven
+datasets and six edges: the URNs are derived rather than assigned, and every
+proposal is an upsert.
+
+| Variable | Default |
+| --- | --- |
+| `DATAHUB_GMS_URL` | `http://localhost:8080` |
+| `DATAHUB_GMS_TOKEN` | — (a default local quickstart needs none) |
+
+This integration uses DataHub's official Python SDK, where the OpenMetadata one
+uses plain REST. That is not an inconsistency: DataHub's write path is an
+Avro-generated aspect inside a *Metadata Change Proposal*, and hand-rolling it
+would mean maintaining a copy of a schema the SDK already holds — while
+OpenMetadata's REST body is the readable thing and its SDK costs 130 packages.
+(DataHub abbreviates Metadata Change Proposal as "MCP". This repository's other
+MCP is the Model Context Protocol server. They are unrelated.)
+
+See [docs/datahub.md](docs/datahub.md) for the modelling differences, the
+identity mapping and the SDK decision, and
+[infra/datahub/README.md](infra/datahub/README.md) for the local deployment.
+
 ## Governance evaluation
 
 Every layer so far produced *evidence*. This one produces a **decision**, and
@@ -615,18 +687,23 @@ Nextflow checks its behaviour.
   transport and what is deferred.
 - [OpenMetadata](docs/openmetadata.md) — containers and CustomStorage, the
   `bio://`-to-FQN mapping, authentication, idempotence and lineage.
+- [DataHub](docs/datahub.md) — datasets and aspects, the `bio://`-to-URN
+  mapping, Metadata Change Proposals, the SDK decision and idempotence.
 - [Governance evaluation](docs/governance-evaluation.md) — why code decides and
   AI only explains, READY/REVIEW/BLOCKED, the five checks and the exit codes.
 - [The MCP server](docs/mcp-server.md) — the read-only boundary, the six tools
   and two resources, stdio, the Inspector and results-root confinement.
 - [Local OpenMetadata](infra/openmetadata/README.md) — starting and stopping the
   official Docker quickstart, and obtaining a token.
+- [Local DataHub](infra/datahub/README.md) — starting and stopping the official
+  DataHub quickstart, and its memory requirement.
 
 ## Deferred work
 
-Deliberately **not** implemented in this milestone: DataHub, Marquez, and
-AI-agent governance in the sense of an agent that *acts*. Each will land as its
-own milestone on top of this foundation. The pipeline is local-execution only —
+Deliberately **not** implemented in this milestone: Marquez, a written
+comparison of the two catalogues, and AI-agent governance in the sense of an
+agent that *acts*. Each will land as its own milestone on top of this
+foundation. The pipeline is local-execution only —
 no Kubernetes, no cloud executor, no container registry.
 
 Data quality here is a single run's evidence and a gate that acts on it. There
@@ -640,11 +717,18 @@ run emits nothing, so failed-run lineage is deferred too. Nextflow's own
 experimental lineage feature is deliberately not mixed in — the provenance here
 is orchestrator-agnostic on purpose.
 
-Catalogue publication is one local OpenMetadata integration and an explicit
-command. The pipeline does not call it, no OpenMetadata `Pipeline`, glossary,
-tag or custom-property entities are created, nothing polls or reconciles, and
-there is no catalogue abstraction layer — an interface with one implementation
-would only be a guess about the second.
+Catalogue publication is two local integrations and an explicit command each.
+The pipeline calls neither, and runs to a verdict with both switched off. No
+OpenMetadata `Pipeline`, glossary, tag or custom-property entities are created;
+no DataHub domains, glossary terms, owners, tags, assertions, data products,
+structured properties or forms are either, and there is no ingestion recipe,
+Kafka emitter or scheduled crawl. Nothing polls or reconciles.
+
+There is still no catalogue abstraction layer, now for a better reason than
+before: the second implementation exists and was deliberately left as a second
+implementation. An interface over the two would have to hide the entity model,
+the identity scheme and the lineage shape — which is what the next milestone is
+for comparing.
 
 Governance evaluation is five checks and a closed enum, not a policy engine.
 There is no Rego, no YAML policy language, no numeric score, no approval

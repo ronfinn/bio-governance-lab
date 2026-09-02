@@ -205,43 +205,6 @@ def test_only_the_explainable_lineage_edges_are_published() -> None:
 # --------------------------------------------------------------------------
 
 
-@pytest.fixture
-def study_files(tmp_path: Path) -> tuple[Path, Path]:
-    """A generated study and the results directory the pipeline would leave."""
-    result = runner.invoke(app, ["demo", "generate", "--output", str(tmp_path / "data")])
-    assert result.exit_code == 0, result.output
-    raw = tmp_path / "data" / "BIO-001"
-
-    results = tmp_path / "results" / "BIO-001"
-    curated = results / "curated"
-    curated.mkdir(parents=True)
-    for name in ("samples.csv", "compounds.csv", "expression.csv"):
-        (curated / name).write_bytes((raw / name).read_bytes())
-
-    report = results / "quality" / "dq-report.json"
-    dq = runner.invoke(app, ["dq", "run", str(raw), "--json-out", str(report)])
-    assert dq.exit_code == 0, dq.output
-
-    events = results / "lineage" / "openlineage.jsonl"
-    emitted = runner.invoke(
-        app,
-        [
-            "lineage",
-            "emit",
-            str(raw),
-            str(curated),
-            "--output",
-            str(events),
-            "--quality-report",
-            str(report),
-            "--run-id",
-            "11111111-2222-3333-4444-555555555555",
-        ],
-    )
-    assert emitted.exit_code == 0, emitted.output
-    return raw, results
-
-
 class FakeOpenMetadata:
     """A stand-in server that records every request and never forgets an entity.
 

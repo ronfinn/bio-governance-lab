@@ -10,16 +10,17 @@ subject data ever belongs in this repository.
 
 ## Current milestone
 
-Milestone 9: domain models, CLI, tests, CI, deterministic synthetic study
+Milestone 10: domain models, CLI, tests, CI, deterministic synthetic study
 generation, YAML data contracts and contract validation, study-level
 data-quality checks, a Nextflow pipeline that gates curation on both,
 OpenLineage provenance events for a successful run, publication of the governed
-assets into a local OpenMetadata instance, one deterministic
-READY/REVIEW/BLOCKED governance decision derived from that evidence, and a
-read-only MCP server exposing that evidence to an AI client.
+assets into a local OpenMetadata instance and into a local DataHub, one
+deterministic READY/REVIEW/BLOCKED governance decision derived from that
+evidence, and a read-only MCP server exposing that evidence to an AI client.
 
-**Not yet implemented, and not to be added without being asked:** DataHub,
-Marquez, AI-agent governance in the sense of an agent that acts. The pipeline is local-execution only: no
+**Not yet implemented, and not to be added without being asked:** Marquez, the
+written OpenMetadata-versus-DataHub comparison, AI-agent governance in the sense
+of an agent that acts. The pipeline is local-execution only: no
 Kubernetes, Seqera Platform, cloud executor, container registry or DSL2 module
 library. Data quality has no history, trends, drift detection, thresholds,
 dashboard or database, and no numeric score. Lineage has no server, HTTP or
@@ -28,7 +29,14 @@ Nextflow's own experimental lineage feature. The catalogue integration is one
 local OpenMetadata over REST: no `openmetadata-ingestion` SDK, no OpenMetadata
 `Pipeline`, glossary, tag, tier, owner or custom-property entities, no sync
 daemon or reconciliation, no catalogue abstraction interface, and no pipeline
-wiring — publication stays an explicit post-run command. The MCP server is
+wiring — publication stays an explicit post-run command. The DataHub
+integration is one local quickstart over its SDK: no ingestion source, recipe or
+scheduled crawl, no Kafka emitter, no domains, glossary terms, owners, tags,
+assertions, data products, structured properties or forms, no policies, soft
+deletes or stateful ingestion, no DataHub Cloud, and no pipeline wiring either.
+There is still no `CatalogAdapter`, `BaseCatalog` or plugin registry, and adding
+one is not a milestone-11 task: comparing the two implementations does not
+require putting them behind an interface. The MCP server is
 read-only, local and stdio-only: no HTTP or SSE transport, no authentication,
 OAuth, reverse proxy or container, no prompts, no catalogue search, no
 `read_file` tool, and no tool that writes anything at all.
@@ -106,9 +114,13 @@ all four before committing.
   MCP import anywhere in it), `server.py` for the tools, resources and
   read-only annotations. Export new public names from `mcp/__init__.py`.
 - `src/bio_governance/catalog/` — `models.py` for the configuration and result
-  models, `mapping.py` for the `bio://`-to-OpenMetadata mapping (no IO, no
-  HTTP), `client.py` for the REST client, `publish.py` for orchestration.
-  Export new public names from `catalog/__init__.py`.
+  models of both catalogues, `mapping.py` for the `bio://`-to-OpenMetadata
+  mapping (no IO, no HTTP), `client.py` for the REST client, `publish.py` for
+  orchestration; `datahub_mapping.py` for the `bio://`-to-URN mapping (no IO, no
+  SDK import), `datahub_client.py` for the SDK boundary, `datahub_publish.py`
+  for orchestration. Export new public names from `catalog/__init__.py` —
+  except the two DataHub modules that import the SDK, which stay out of it so
+  the CLI does not pay for the metadata model on every command.
 - `contracts/` — the contract definitions themselves, as YAML. Committed.
 - `pipelines/nextflow/` — `main.nf` holds the DSL2 workflow, `nextflow.config`
   its parameters and manifest. Nothing else belongs here.
@@ -120,12 +132,16 @@ all four before committing.
 - `infra/openmetadata/` — the README for the official local Docker quickstart,
   and nothing else. The compose file is downloaded, not vendored, and it and its
   `docker-volume/` are git-ignored.
+- `infra/datahub/` — the README for DataHub's own `datahub docker quickstart`,
+  and nothing else. Its compose file lives in `~/.datahub/`, not here.
 - `tests/` — mirrors the source modules. Shared fixtures live in `conftest.py`.
 - `docs/` — `architecture.md` (decisions), `governance-model.md` (meaning),
   `synthetic-data.md` (the generated study), `data-contracts.md` (the contract
   format and validation), `data-quality.md` (the checks and the evidence),
   `lineage.md` (OpenLineage job, run, datasets and transport),
   `openmetadata.md` (containers, identity mapping, auth, idempotence, lineage),
+  `datahub.md` (datasets and aspects, the URN mapping, the SDK decision,
+  idempotence),
   `governance-evaluation.md` (the decision model, the five checks, exit codes),
   `mcp-server.md` (the read-only boundary, the tools and resources, stdio,
   the Inspector, results-root confinement).
@@ -227,33 +243,67 @@ all four before committing.
   `onComplete` handler, or an `errorStrategy` change to work around it.
 - **Nextflow is not a Python dependency.** It is installed separately and CI does
   not install it.
-- **The catalogue is published to over REST, not through the SDK.**
+- **OpenMetadata is published to over REST, not through the SDK.**
   `openmetadata-ingestion` resolves to around 130 transitive packages for five
   kinds of request. Use `httpx` against the documented endpoints.
 - **Storage service and containers, and never a false service type.** Our assets
   are generated files, so they are containers of one `CustomStorage` storage
   service. Registering them as MySQL, PostgreSQL or Snowflake would put a false
   statement in the catalogue.
+- **DataHub is published to through the SDK, and the two answers are not an
+  inconsistency.** The decision is made per catalogue from what its API is:
+  OpenMetadata's REST body is the readable thing, while DataHub's write is an
+  Avro-generated aspect inside a Metadata Change Proposal, and hand-rolling that
+  would mean maintaining a copy of a schema `acryl-datahub` already holds. Write
+  "Metadata Change Proposal" in full in documentation — DataHub's own
+  abbreviation for it collides with this project's Model Context Protocol
+  server.
+- **The DataHub SDK is imported lazily**, like the MCP SDK and for the same
+  reason: it costs about half a second, and `datahub_client.py` and
+  `datahub_publish.py` are therefore not re-exported from `catalog/__init__.py`.
+  Keep `datahub_mapping.py` free of the SDK import so deriving a URN stays
+  cheap; the test that asserts the URN matches `make_dataset_urn` is what keeps
+  the hand-built string honest.
+- **Data platform and datasets, and a dedicated platform.** DataHub has no
+  container entity, so the seven assets are `Dataset`s of a
+  `bio_governance_lab` platform in `PROD`. Registering them under `s3` or
+  `file` would say something untrue about where they came from.
 - **`bio://` identity is not replaced by an OpenMetadata FQN.** The entity name
   is derived from the identifier one-way, and the canonical URI is carried
   unchanged in the container's `fullPath`. An FQN is scoped to one deployment;
   `bio://` is not.
-- **Every catalogue write is a create-or-update `PUT`.** Idempotence is a
-  property of the requests, not of bookkeeping. Do not add a read-then-decide
-  step or a local record of what was published.
+- **`bio://` identity is not replaced by a DataHub URN either.** The dataset
+  name is derived one-way — `bio://BIO-001/raw/samples` to
+  `BIO-001.raw.samples` — and the canonical URI is carried back in
+  `qualifiedName` and in the `canonical_asset_id` custom property. The URI is
+  deliberately not used as the dataset name: the URN already names the platform,
+  and DataHub's browse paths split the name on the platform delimiter.
+- **Every catalogue write is a create-or-update.** A `PUT` in OpenMetadata, an
+  `UPSERT` proposal against a derived URN in DataHub. Idempotence is a property
+  of the requests, not of bookkeeping. Do not add a read-then-decide step or a
+  local record of what was published.
+- **A DataHub aspect is replaced whole, so grouped lineage is not optional.**
+  The quality report's three raw inputs go in one `upstreamLineage` aspect; six
+  edges are four aspects. Sending them one at a time would silently keep the
+  last.
 - **Only lineage edges that can be explained in a sentence.** Six per study: each
   raw file to its curated copy, and all three raw files to the quality report.
   Do not derive edges from an OpenLineage event's input-output cross product.
 - **Provenance is only claimed for files that exist**, as in the lineage layer:
   every file a container will name is checked before the first request, so a
   failed publication leaves nothing half-catalogued.
-- **A token is configuration, never an argument.** Read `OPENMETADATA_HOST` and
-  `OPENMETADATA_JWT_TOKEN` from the environment. Never hard-code, commit, log or
+- **A token is configuration, never an argument.** Read `OPENMETADATA_HOST`,
+  `OPENMETADATA_JWT_TOKEN`, `DATAHUB_GMS_URL` and `DATAHUB_GMS_TOKEN` from the
+  environment. Never hard-code, commit, log or
   echo a token — `token_hint` is the only thing that may be printed. `health` is
   answerable without one; every write demands one and the error names the
   variable.
-- **The pipeline must run with OpenMetadata offline.** Publication is an explicit
-  post-run command, not a process in `main.nf`.
+- **The pipeline must run with both catalogues offline.** Publication is an
+  explicit post-run command, not a process in `main.nf`.
+- **The two catalogue integrations stay side by side, not behind an interface.**
+  They share the models and the evidence-reading helpers in `publish.py`, and
+  nothing else. Do not add `CatalogAdapter`, `BaseCatalog` or a registry to make
+  them symmetrical: the differences are the subject of the comparison.
 - **Deterministic code decides; AI explains.** The governance decision is
   computed from files on disk — no clock, network, catalogue, randomness or
   model. A later milestone may have an LLM explain a report; it must never
@@ -337,8 +387,8 @@ producer, and the raw and curated dataset names. An explicit `run_id` is how a
 test asserts on a known value. The CLI gets a test writing a real JSONL file and
 one proving a missing source file exits 2.
 
-Catalogue tests mock HTTP with `respx` and must never need a server: CI does
-not start OpenMetadata. A fake server keys entities the way the real one does, so
+Catalogue tests mock the boundary and must never need a server: CI starts
+neither OpenMetadata nor DataHub. The OpenMetadata tests mock HTTP with `respx`. A fake server keys entities the way the real one does, so
 a duplicate shows up as a second entry rather than an overwrite. Assert on the
 configuration defaults, the clear error when a token is missing, the entity-name
 mapping, the seven prepared assets, the preserved `bio://` identity, the file

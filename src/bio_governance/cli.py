@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -11,11 +12,16 @@ from pydantic import BaseModel
 
 from bio_governance import __version__
 from bio_governance.catalog import (
+    CANONICAL_PROPERTY,
     DEFAULT_CONTRACT_DIR,
+    CatalogAsset,
     CatalogError,
+    DataHubConfig,
     OpenMetadataClient,
     OpenMetadataConfig,
     PublishedCatalog,
+    dataset_name,
+    dataset_urn,
     fully_qualified_name,
     publish_study,
     study_identifiers,
@@ -37,6 +43,7 @@ from bio_governance.lineage import (
     LineageError,
     emit_curation_lineage,
 )
+from bio_governance.models import AssetIdentifier
 from bio_governance.quality import (
     QualityCheckStatus,
     QualityReport,
@@ -122,6 +129,13 @@ openmetadata_app = typer.Typer(
 )
 catalog_app.add_typer(openmetadata_app, name="openmetadata")
 
+datahub_app = typer.Typer(
+    name="datahub",
+    help="Publish to a local DataHub instance.",
+    no_args_is_help=True,
+)
+catalog_app.add_typer(datahub_app, name="datahub")
+
 
 def _version_callback(value: bool) -> None:
     if value:
@@ -155,6 +169,7 @@ def info() -> None:
     typer.echo("OpenLineage provenance events for a curation run: 'bio-gov lineage emit'.")
     typer.echo("Deterministic governance decisions: 'bio-gov governance evaluate'.")
     typer.echo("Publication to a local OpenMetadata: 'bio-gov catalog openmetadata publish'.")
+    typer.echo("The same assets in DataHub: 'bio-gov catalog datahub publish'.")
     typer.echo("Read-only MCP access to that evidence: 'bio-gov mcp serve'.")
 
 
@@ -633,18 +648,172 @@ def catalog_get(
         typer.echo(f"  {name}")
 
 
-def _format_catalog(published: PublishedCatalog) -> list[str]:
-    """Render a publication as the lines of the CLI summary."""
+@datahub_app.command("health")
+def datahub_health() -> None:
+    """Report whether the configured DataHub instance is reachable.
+
+    A default local quickstart has metadata-service authentication switched off,
+    so this says nothing about a token beyond whether one was configured — and
+    never what it is. Exits 0 when the server answered and 2 when it did not.
+    """
+    from bio_governance.catalog.datahub_client import DataHubClient
+
+    config = DataHubConfig.from_env()
+    typer.echo(f"GMS: {config.gms_url}")
+    typer.echo(f"Token: {config.token_hint}")
+
+    try:
+        with DataHubClient(config) as client:
+            version = client.server_version()
+    except CatalogError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(ERROR_EXIT_CODE) from exc
+
+    typer.echo(f"DataHub: {version}")
+
+
+@datahub_app.command("publish")
+def datahub_publish(
+    raw: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            help="Raw study directory, e.g. data/raw/BIO-001.",
+        ),
+    ],
+    results: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            help="Pipeline results directory, e.g. results/BIO-001.",
+        ),
+    ],
+    contracts: Annotated[
+        Path,
+        typer.Option("--contracts", help="Directory the shipped contracts are read from."),
+    ] = DEFAULT_CONTRACT_DIR,
+) -> None:
+    """Publish a study's governed assets and their lineage to DataHub.
+
+    Upserts one data platform, the study's seven datasets and the six lineage
+    edges this project can explain, as Metadata Change Proposals against URNs
+    derived from the bio:// identifiers. Running it twice updates the same
+    entities rather than creating a second set. Exits 0 on success and 2 when
+    the catalogue could not be reached or a claimed file is missing.
+    """
+    from bio_governance.catalog.datahub_client import DataHubClient
+    from bio_governance.catalog.datahub_publish import publish_study_to_datahub
+
+    config = DataHubConfig.from_env()
+    try:
+        with DataHubClient(config) as client:
+            version = client.server_version()
+            published = publish_study_to_datahub(client, raw, results, contract_dir=contracts)
+    except CatalogError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(ERROR_EXIT_CODE) from exc
+
+    typer.echo(f"DataHub: {version} at {config.gms_url}")
+    for line in _format_catalog(published, service_label="Platform", name_of=_datahub_name):
+        typer.echo(line)
+
+
+@datahub_app.command("get")
+def datahub_get(
+    study: Annotated[
+        str,
+        typer.Argument(help="Study identifier whose published assets to retrieve, e.g. BIO-001."),
+    ],
+) -> None:
+    """Read a study's published assets back out of DataHub.
+
+    This is the verification half of publication: it asks the catalogue what it
+    holds rather than trusting what was sent. Each dataset is fetched by its URN
+    and reported with the bio:// identifier it carries, and every upstream
+    DataHub holds is fetched too, so the six edges can be confirmed through the
+    SDK rather than by looking at the UI. Exits 0 when every expected asset came
+    back and 2 when one did not.
+    """
+    from bio_governance.catalog.datahub_client import DataHubClient
+
+    config = DataHubConfig.from_env()
+    identifiers = study_identifiers(study)
+
+    try:
+        with DataHubClient(config) as client:
+            datasets = [
+                (identifier, client.get_dataset_properties(dataset_urn(identifier)))
+                for identifier in identifiers
+            ]
+            edges = [
+                (dataset_urn(identifier), client.get_upstreams(dataset_urn(identifier)))
+                for identifier in identifiers
+            ]
+    except CatalogError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(ERROR_EXIT_CODE) from exc
+
+    missing = [identifier.uri for identifier, properties in datasets if properties is None]
+    typer.echo(f"Study: {study}")
+    typer.echo(f"Assets: {len(datasets) - len(missing)} of {len(datasets)}")
+    typer.echo("")
+
+    width = max(len(dataset_urn(identifier)) for identifier, _ in datasets)
+    for identifier, properties in datasets:
+        urn = dataset_urn(identifier)
+        if properties is None:
+            typer.echo(f"  {urn.ljust(width)}  (not in DataHub)")
+            continue
+        canonical = (properties.customProperties or {}).get(CANONICAL_PROPERTY, "(none)")
+        typer.echo(f"  {urn.ljust(width)}  {canonical}")
+        if canonical != identifier.uri:
+            typer.echo(f"    warning: {CANONICAL_PROPERTY} is not {identifier.uri}")
+
+    found = [(urn, upstream) for urn, upstreams in edges for upstream in upstreams]
+    typer.echo(f"\n{len(found)} lineage edges")
+    for urn, upstream in found:
+        typer.echo(f"  {upstream} -> {urn}")
+
+    if missing:
+        typer.echo(f"error: DataHub holds nothing for {', '.join(missing)}", err=True)
+        raise typer.Exit(ERROR_EXIT_CODE)
+
+
+def _datahub_name(asset: CatalogAsset) -> str:
+    """The DataHub dataset name for an asset, derived from its bio:// identity.
+
+    ``CatalogAsset.name`` is the OpenMetadata entity name; printing it in a
+    DataHub summary would report an identity that catalogue does not hold.
+    """
+    return dataset_name(AssetIdentifier.parse(asset.identifier))
+
+
+def _format_catalog(
+    published: PublishedCatalog,
+    *,
+    service_label: str = "Service",
+    name_of: Callable[[CatalogAsset], str] = lambda asset: asset.name,
+) -> list[str]:
+    """Render a publication as the lines of the CLI summary.
+
+    Shared by both catalogues, because a publication means the same thing in
+    each. Two things differ, and both are arguments: the word for the thing the
+    assets belong to — a storage service in OpenMetadata, a data platform in
+    DataHub — and how each catalogue names an asset.
+    """
     lines = [
-        f"Service: {published.service}",
+        f"{service_label}: {published.service}",
         f"Study: {published.study_id}",
         "",
         f"{len(published.assets)} assets",
     ]
-    width = max(len(asset.name) for asset in published.assets)
+    names = [name_of(asset) for asset in published.assets]
+    width = max(len(name) for name in names)
     lines += [
-        f"  {asset.name.ljust(width)}  {asset.file_format.value:<4}  {asset.identifier}"
-        for asset in published.assets
+        f"  {name.ljust(width)}  {asset.file_format.value:<4}  {asset.identifier}"
+        for name, asset in zip(names, published.assets, strict=True)
     ]
     lines += ["", f"{len(published.edges)} lineage edges"]
     lines += [f"  {edge}" for edge in published.edges]
