@@ -10,17 +10,18 @@ subject data ever belongs in this repository.
 
 ## Current milestone
 
-Milestone 12: domain models, CLI, tests, CI, deterministic synthetic study
+Milestone 13: domain models, CLI, tests, CI, deterministic synthetic study
 generation, a committed per-study governance declaration (owner, steward,
 contact, classification) and its validation, YAML data contracts and contract
 validation, study-level data-quality checks, a Nextflow pipeline that gates
 curation on all three, OpenLineage provenance events for a successful run,
 publication of the governed assets — with their classification, and in DataHub
 their ownership — into a local OpenMetadata instance and into a local DataHub,
-one deterministic READY/REVIEW/BLOCKED governance decision derived from seven
-checks over that evidence, a read-only MCP server exposing that evidence to an
-AI client, and `docs/catalog-comparison.md` — the written case study comparing
-the two catalogue integrations.
+both verified live, with OpenMetadata reclassifying a container when its
+study's declaration changes, one deterministic READY/REVIEW/BLOCKED governance
+decision derived from seven checks over that evidence, a read-only MCP server
+exposing that evidence to an AI client, and `docs/catalog-comparison.md` — the
+written case study comparing the two catalogue integrations.
 
 **Not yet implemented, and not to be added without being asked:** Marquez,
 AI-agent governance in the sense of an agent that acts. The pipeline is
@@ -31,8 +32,9 @@ Kafka transport, database, failed-run events or custom facets, and does not use
 Nextflow's own experimental lineage feature. The catalogue integration is one
 local OpenMetadata over REST: no `openmetadata-ingestion` SDK, no OpenMetadata
 `Pipeline`, glossary, tier, owner, user, team or custom-property entities (one
-`Classification` and its four tags are the only governance entities), no
-`PATCH` for reclassification, no sync
+`Classification` and its four tags are the only governance entities), exactly
+one `PATCH` — the `add` of `/tags` that sets a container's classification — and
+no general JSON Patch support, entity diffing or other patched field, no sync
 daemon or reconciliation, no catalogue abstraction interface, and no pipeline
 wiring — publication stays an explicit post-run command. The DataHub
 integration is one local quickstart over its SDK: no ingestion source, recipe or
@@ -85,6 +87,7 @@ export OPENMETADATA_JWT_TOKEN=...            # never a flag, never committed
 uv run bio-gov catalog openmetadata health
 uv run bio-gov catalog openmetadata publish data/raw/BIO-001 results/BIO-001
 uv run bio-gov catalog openmetadata get BIO-001
+OPENMETADATA_INTEGRATION_TEST=1 uv run pytest tests/test_catalog_live.py  # live, incl. reclassification
 
 # decide whether a study's evidence makes it ready to use
 uv run bio-gov governance evaluate results/BIO-001
@@ -167,7 +170,8 @@ all four before committing.
   represents it), `data-contracts.md` (the contract
   format and validation), `data-quality.md` (the checks and the evidence),
   `lineage.md` (OpenLineage job, run, datasets and transport),
-  `openmetadata.md` (containers, identity mapping, auth, idempotence, lineage),
+  `openmetadata.md` (containers, identity mapping, auth, the classification
+  lifecycle, idempotence, lineage),
   `datahub.md` (datasets and aspects, the URN mapping, the SDK decision,
   idempotence), `catalog-comparison.md` (the two integrations side by side, and
   the limits of the experiment),
@@ -308,10 +312,24 @@ all four before committing.
   `qualifiedName` and in the `canonical_asset_id` custom property. The URI is
   deliberately not used as the dataset name: the URN already names the platform,
   and DataHub's browse paths split the name on the platform delimiter.
-- **Every catalogue write is a create-or-update.** A `PUT` in OpenMetadata, an
-  `UPSERT` proposal against a derived URN in DataHub. Idempotence is a property
-  of the requests, not of bookkeeping. Do not add a read-then-decide step or a
-  local record of what was published.
+- **Every catalogue write is a create-or-update or a set.** A `PUT` in
+  OpenMetadata, an `UPSERT` proposal against a derived URN in DataHub, and the
+  one OpenMetadata `PATCH` that sets a container's tag list to a value.
+  Idempotence is a property of the requests, not of bookkeeping. Do not add a
+  read-then-decide step or a local record of what was published.
+- **OpenMetadata's classification is set by a `PATCH`, never by the container
+  `PUT`.** Observed on 1.13.4: a `PUT` merges tags, so a changed classification
+  is refused with HTTP 400 (mutually exclusive). The container `PUT` carries no
+  tags; `classify_container` reads the container's tags and sends one JSON Patch
+  `add` of `/tags` built by `classified_tags()` in `mapping.py`. The read only
+  decides which labels to keep — the same `PATCH` is sent every publication, and
+  re-setting unchanged tags is a server no-op. The project owns one namespace:
+  labels sourced from `Classification` under `bio_governance_classification.`.
+  Every other label (`PII`, `Tier`, glossary terms, a steward's tags) goes back
+  exactly as returned. Never delete or replace tags outside that namespace, never
+  use the asynchronous bulk `assets/remove`, and never treat the catalogue's
+  current classification as input — it is discarded; the declaration's value is
+  the one sent.
 - **A DataHub aspect is replaced whole, so grouped lineage is not optional.**
   The quality report's three raw inputs go in one `upstreamLineage` aspect; six
   edges are four aspects. Sending them one at a time would silently keep the
@@ -385,7 +403,8 @@ all four before committing.
   Never publish from the YAML directly.
 - **Each catalogue gets the governance its model can honestly hold.**
   OpenMetadata: classification as a mutually exclusive `Classification` with
-  four tags and a tag label per container; ownership *not sent*, because owners
+  four tags and a tag label per container, kept in step with the declaration
+  across reclassification; ownership *not sent*, because owners
   must be existing users or Group teams addressed by server UUID, and this
   project provisions no accounts — do not smuggle it into a description or a
   custom property. DataHub: classification as a glossary term under one node,
@@ -468,13 +487,26 @@ one proving a missing source file exits 2.
 Catalogue tests mock the boundary and must never need a server: CI starts
 neither OpenMetadata nor DataHub. The OpenMetadata tests mock HTTP with
 `respx`. A fake server keys entities the way the real one does, so
-a duplicate shows up as a second entry rather than an overwrite. Assert on the
-configuration defaults, the clear error when a token is missing, the entity-name
-mapping, the seven prepared assets, the preserved `bio://` identity, the file
-formats, the six-edge set, useful messages for connection and token failures,
-and that a second publication sends the same requests as the first. The live
-demonstration lives in `tests/test_catalog_live.py` and skips unless
-`OPENMETADATA_INTEGRATION_TEST=1`.
+a duplicate shows up as a second entry rather than an overwrite, and its tag
+semantics are the ones observed live: a `PUT` merges tags and refuses a second
+value of a mutually exclusive classification with the server's own HTTP 400
+message, a `PATCH` replaces, and `PII` exists as it does on every real server.
+Do not give the fake friendlier semantics than the server — a fake that
+overwrote tags on `PUT` would pass a publication that cannot reclassify. Assert
+on the configuration defaults, the clear error when a token is missing, the
+entity-name mapping, the seven prepared assets, the preserved `bio://` identity,
+the file formats, the six-edge set, useful messages for connection and token
+failures, and that a second publication sends the same requests as the first.
+The classification lifecycle is one parametrized test over `none → internal`,
+`internal → internal`, `internal → confidential`, `confidential → restricted`
+and `restricted → public`, each with a steward's `PII` tag that must survive
+and each republished to prove idempotence; `declare_classification` in
+`conftest.py` judges a tmp_path copy of the committed declaration, which is
+never edited. The live demonstration lives in `tests/test_catalog_live.py` and
+skips unless `OPENMETADATA_INTEGRATION_TEST=1`; it walks the same transitions on
+the real server, reads owners back with `fields=tags,owners` (without it
+OpenMetadata omits `owners` and an absence assertion cannot fail), and leaves
+the deterministic BIO-001 entities as the committed declaration describes them.
 
 Governance metadata tests load the shipped declarations from
 `governance/studies/` and validate each against a generated study of its name.

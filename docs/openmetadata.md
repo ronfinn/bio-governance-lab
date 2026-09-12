@@ -29,7 +29,8 @@ The version this milestone was built and demonstrated against is **1.13.4**, the
 latest 1.x stable release at the time. It is not 1.12.6: that release has been
 superseded several times over, and 2.0.0 was eight days old, which is not what
 "current stable quickstart" should mean for a deployment somebody else will
-reproduce.
+reproduce. Milestone 13's live validation and reclassification ran against the
+same 1.13.4 quickstart; the integration was not upgraded to do it.
 
 ## Configuration
 
@@ -105,7 +106,9 @@ not. That asymmetry is the reason `AssetIdentifier` was not replaced by an FQN.
 - `size` in bytes and `numberOfObjects`
 - a `dataModel` of columns, for `samples` and `compounds` only
 - a tag label for the study's classification, from its validated governance
-  declaration — `bio_governance_classification.internal` for BIO-001
+  declaration — `bio_governance_classification.internal` for BIO-001 — set by a
+  JSON Patch straight after the container's `PUT` (see
+  [Classification lifecycle](#classification-lifecycle))
 
 The columns come from the shipped YAML contracts, not from a CSV header: the
 contract is the file's *declared* structure, so publishing it puts the agreed
@@ -127,8 +130,8 @@ mutually exclusive tag vocabulary is a *Classification*, so publication
 upserts one, `bio_governance_classification`, with `mutuallyExclusive: true`
 and a tag for each of the project's four values, and each container carries the
 declared value as a `Classification`-sourced, `Manual`, `Confirmed` tag label.
-The tags are upserted before the containers because a container cannot carry a
-tag that does not exist.
+The tags are upserted before any container is classified because a container
+cannot carry a tag that does not exist.
 
 The **ownership** does not. An OpenMetadata owner is an entity reference whose
 `id` is required: the UUID of a User or Group-type Team the server already
@@ -137,13 +140,89 @@ so no owner is sent — and neither of the workarounds is taken: a bot's `PUT`
 reverts a changed description on an existing entity, and a custom property
 would put a second, disagreeing "owner" beside OpenMetadata's own. Ownership
 stays canonical in `governance/studies/`. `publish` refuses, before any request,
-a study whose declaration evidence is missing or did not validate.
+a study whose declaration evidence is missing or did not validate. Read back
+with `fields=tags,owners`, every container reports `"owners": []` — asked for,
+and empty, rather than merely not returned.
 
-On a `PUT`, OpenMetadata merges the request's tags into the container's existing
-ones and then enforces mutual exclusivity, so republishing the same
-classification changes nothing and a *changed* one is refused rather than
-doubled. These behaviours are read from the 1.13.4 server source, not observed
-in this milestone. The full account, with DataHub's contrasting model, is in
+## Classification lifecycle
+
+Two different things happen to a container's classification, and milestone 13
+separated them after observing both on the live 1.13.4 server.
+
+**Initial publication** — `none → internal`, and republishing `internal →
+internal` — worked with the milestone-12 `PUT`, as predicted. On a `PUT`,
+OpenMetadata *merges* the request's tags into the ones the container already
+holds, then enforces mutual exclusivity, so a `PUT` can add the first value and
+re-add the same one harmlessly.
+
+**Reclassification** — `internal → confidential` — did not. Observed, with a
+validated `confidential` declaration published over `internal` containers:
+
+```
+PUT /v1/containers  →  HTTP 400
+Tag labels bio_governance_classification.internal and
+bio_governance_classification.confidential are mutually exclusive and can't be
+assigned together
+```
+
+`bio-gov catalog openmetadata publish` exited 2, and the server's state was
+unchanged: the first container's `PUT` was refused, so no container moved. No
+form of `PUT` can fix it — sending no `tags`, or `"tags": []`, also leaves the
+held tags where they are — because a merge can add a label but never remove one.
+
+So the classification is now set by a different request. The container `PUT`
+carries no tags at all, and straight after it `classify_container` sends:
+
+```
+GET   /v1/containers/{id}?fields=tags           what the container holds now
+PATCH /v1/containers/{id}                       Content-Type: application/json-patch+json
+      [{"op": "add", "path": "/tags", "value": [ ...every label outside
+         bio_governance_classification, exactly as returned...,
+         {"tagFQN": "bio_governance_classification.confidential", ...} ]}]
+```
+
+A `PATCH` *replaces* the tag list, so the old value is removed in the same
+request that adds the new one, and the server never sees two values of the
+mutually exclusive classification at once. The list is computed by
+`classified_tags()` in `mapping.py`, which owns exactly one namespace: labels
+whose source is `Classification` and whose FQN is under
+`bio_governance_classification.`. Everything else on a container — `PII`,
+`Tier`, a glossary term, a tag a steward added in the UI — goes back unchanged.
+The catalogue's *current* project classification is read only to be discarded;
+the value that goes back is always the validated declaration's.
+
+The same `PATCH` is sent on every publication, changed or not. Observed: a
+`PATCH` of the tags a container already holds is a no-op — no new version, an
+empty change description — so there is no read-then-decide step, and a
+republication sends the same requests as the last one.
+
+| Transition | After publication | Observed live |
+| --- | --- | --- |
+| none → internal | `internal` only | yes |
+| internal → internal | `internal` only, nothing changed | yes |
+| internal → confidential | `confidential` only; `internal` gone | yes |
+| confidential → restricted | `restricted` only; `confidential` gone | yes |
+| restricted → public | `public` only; `restricted` gone | yes |
+
+In every row a `PII.NonSensitive` tag applied beforehand, as a steward would,
+survives, and publishing the resulting declaration a second time leaves the
+read-back — tags, owners, `fullPath` and entity versions — identical.
+
+Two candidates were rejected on evidence. OpenMetadata's bulk
+`PUT /v1/tags/{id}/assets/remove` returns a `jobId` and removes the tag in the
+background — immediately afterwards the tag was still there — so a publication
+would race its own request. And deleting every tag before re-adding the
+declared one would destroy exactly the labels this project does not own.
+
+A new container is created untagged and classified by the next request; a
+failure between the two leaves one unclassified container and exits 2, and the
+next publication classifies it. OpenMetadata's own entity versions are not the
+record of any of this: through the whole walk above, containers stayed at
+version 0.2, consistent with the server consolidating one user's successive
+changes into one version. The history that matters is the declaration's, in
+Git.
+
+The full account, with DataHub's contrasting model, is in
 [governance-metadata.md](governance-metadata.md).
 
 ## Lineage
@@ -201,13 +280,20 @@ quality run does.
 
 ## Idempotence
 
-Every write is a `PUT`, and OpenMetadata's `PUT` routes are create-or-update.
-Publishing twice therefore addresses the same entities rather than creating a
-second set — for containers, the service, the classification, its tags and
-lineage edges alike — and
-idempotence is a property of the requests rather than of bookkeeping this project
-does. After two consecutive publications the service holds seven containers, all
-still at entity version `0.1`, and `raw/samples` has two downstream edges.
+Every write but one is a `PUT`, and OpenMetadata's `PUT` routes are
+create-or-update. Publishing twice therefore addresses the same entities rather
+than creating a second set — for containers, the service, the classification,
+its tags and lineage edges alike. The one other write, the classification
+`PATCH`, sets the tag list to a value rather than changing it by a delta, so
+repeating it is a no-op. Idempotence is a property of the requests rather than
+of bookkeeping this project does: no record of what was published is kept.
+
+Observed on 1.13.4 in milestone 13: two consecutive publications of BIO-001 left
+seven containers, one classification with four tags and six edges, with a
+read-back identical in every field the tests read, entity versions included.
+(The milestone-7 containers were at version 0.1; the first publication that
+classified them moved them to 0.2, and identical republications left them
+there.)
 
 ## REST, not the SDK
 
@@ -218,7 +304,7 @@ is — see [datahub.md](datahub.md).)
 OpenMetadata ships an official Python SDK, `openmetadata-ingestion`. This
 project does not use it. Resolving it for this environment pulls in around 130
 transitive packages — dbt-core, boto3, grpcio, numpy and the Kubernetes client
-among them — to issue eight kinds of request, five of them writes,
+among them — to issue ten kinds of request, six of them writes,
 against a project whose entire dependency list otherwise fits on one line. The
 REST API is the same interface the SDK calls, so the client calls it directly
 over `httpx`:
@@ -230,9 +316,15 @@ over `httpx`:
 | classification | `PUT /v1/classifications` |
 | classification tag | `PUT /v1/tags` |
 | container | `PUT /v1/containers` |
+| a container's current tags | `GET /v1/containers/{id}?fields=tags` |
+| a container's classification | `PATCH /v1/containers/{id}` (one `add` of `/tags`) |
 | lineage edge | `PUT /v1/lineage` |
-| read back | `GET /v1/containers/name/{fqn}` |
+| read back | `GET /v1/containers/name/{fqn}?fields=tags,owners` |
 | read lineage | `GET /v1/lineage/container/name/{fqn}` |
+
+One publication of BIO-001 is 33 requests: 1 service, 1 classification, 4 tags,
+7 × (container `PUT`, tag `GET`, classification `PATCH`) and 6 edges — 26 of
+them writes.
 
 The SDK becomes the right answer when this project needs ingestion workflows,
 connectors or the entity models themselves. Publishing seven containers is not
@@ -247,10 +339,23 @@ controls — the configuration defaults, the clear error when a token is missing
 the deterministic entity-name mapping, the seven prepared assets, the preserved
 `bio://` identity, the file formats, the six-edge set, the mutually exclusive
 classification with its four tags, the declared tag on every container, the
-absence of any owner, tags existing before the containers that carry them, the
+absence of any owner, tags existing before any container is classified, the
 refusal of missing, failed or wrong-study governance evidence, useful messages
 for connection failures and rejected tokens, and that a second publication sends
 the same requests as the first.
+
+The fake's tag semantics are the ones observed live — a `PUT` merges and
+refuses a second value of a mutually exclusive classification with the server's
+own HTTP 400 message, a `PATCH` replaces — and it ships the system `PII`
+classification, as a real server does
+(`test_the_fake_refuses_a_put_reclassification_as_the_live_server_did`).
+Against that fake, `test_publication_sets_exactly_the_declared_classification`
+walks the five transitions in the table above with a steward's `PII` tag on
+every container, `test_classified_tags_*` pin the namespace rule without HTTP,
+and `test_a_reclassification_that_did_not_validate_sends_nothing` proves a
+failed declaration still sends no request. Run against the milestone-12
+`PUT`-only publication, the three reclassification cases fail with the same
+HTTP 400 the live server returned.
 
 `tests/test_catalog_live.py` is the live demonstration, skipped unless
 `OPENMETADATA_INTEGRATION_TEST=1`:
@@ -260,9 +365,14 @@ export OPENMETADATA_JWT_TOKEN=...
 OPENMETADATA_INTEGRATION_TEST=1 uv run pytest tests/test_catalog_live.py
 ```
 
-Since milestone 12 the live test also asserts the classification tag and the
-absence of owners on every container. It has not yet been run against a server
-with those assertions: OpenMetadata was not running during that milestone.
+It publishes BIO-001 twice and asserts an identical read-back, the `bio://`
+identity in every `fullPath`, the `internal` tag, `"owners": []` and the six
+edges; then it strips the project classification, tags every container
+`PII.NonSensitive` as a steward would, and walks `none → internal → internal →
+confidential → restricted → public`, publishing each state twice. It finishes by
+restoring the committed declaration and removing the steward's tag, so the
+deterministic BIO-001 entities are left as the declaration describes them.
+Milestone 13 ran it against the local 1.13.4 quickstart: 3 passed.
 
 CI never starts OpenMetadata and never needs it.
 
@@ -272,11 +382,16 @@ CI never starts OpenMetadata and never needs it.
   Nextflow pipeline must keep running with the server off.
 - **No OpenMetadata `Pipeline` entity**, no test-case or data-quality entities,
   no glossary, tiers, owners, users or teams, and no custom properties. One
-  Classification and its four tags are the only governance entities; a
-  reclassification is not `PATCH`ed.
-- **No DataHub, Marquez, MCP or AI-agent governance.**
+  Classification and its four tags are the only governance entities.
+- **One `PATCH`, not a patch framework.** The only `PATCH` the client sends is
+  the single `add` of `/tags` that sets the classification. There is no general
+  JSON Patch support, no diffing of entities and no other field patched.
+- **No Marquez or AI-agent governance.**
 - **No sync daemon and no reconciliation.** Publication is something a person or
-  a later orchestration step runs; nothing polls, and nothing deletes a
-  container whose file has gone.
-- **No catalogue abstraction.** There is one integration. An interface with one
-  implementation is a guess about the second.
+  a later orchestration step runs; nothing polls, nothing deletes a container
+  whose file has gone, and a classification changed by hand in the UI stays
+  changed until the next publication sets it back.
+- **No catalogue abstraction.** The DataHub integration sits beside this one,
+  not behind a shared interface; reclassification is a further difference
+  between them, not a reason to add one (see
+  [catalog-comparison.md](catalog-comparison.md)).

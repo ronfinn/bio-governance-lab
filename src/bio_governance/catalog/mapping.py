@@ -31,6 +31,12 @@ and each container carries the declared one::
     classification: internal
       tag  bio_governance_classification.internal
 
+That namespace is the only part of a container's tags this project owns.
+:func:`classified_tags` computes a container's labels with the classification
+set to the declared value and everything else left exactly as it was, which is
+what lets a reclassification replace the old value without disturbing a tag
+somebody else put there.
+
 Its **ownership** does not. An OpenMetadata owner is a reference, by server-
 assigned UUID, to a User or Team the server already holds; the declaration
 names people, and creating or looking up accounts for them would be user
@@ -42,6 +48,8 @@ Nothing in this module performs IO or speaks HTTP.
 """
 
 from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
 
 from bio_governance.catalog.models import (
     CatalogAsset,
@@ -118,6 +126,50 @@ def classification_tag_fqn(classification: Classification) -> str:
     ``bio_governance_classification.internal``, not a translation of it.
     """
     return f"{CLASSIFICATION_NAME}.{classification.value}"
+
+
+def classification_tag_label(classification: Classification) -> dict[str, object]:
+    """The tag label a container carries for its study's classification.
+
+    ``Manual`` and ``Confirmed`` because a person declared it, in a committed
+    file, and a gate validated it; nothing about it was suggested or inferred.
+    """
+    return {
+        "tagFQN": classification_tag_fqn(classification),
+        "source": "Classification",
+        "labelType": "Manual",
+        "state": "Confirmed",
+    }
+
+
+def classified_tags(
+    current: Sequence[Mapping[str, object]], classification: Classification
+) -> list[dict[str, object]]:
+    """A container's tag labels with its project classification set to ``classification``.
+
+    This project owns exactly one namespace on a container: labels sourced from
+    ``bio_governance_classification``. Every other label — another
+    classification such as ``PII``, a glossary term, a tag a steward added in the
+    UI — is kept exactly as the server returned it, in the order it returned it.
+    Then the declared classification is appended. Any earlier value of the
+    project's classification is not carried over, which is the whole of a
+    reclassification.
+
+    Computed from what the catalogue holds, but never *about* what it holds: the
+    catalogue's current classification is discarded, not consulted, and the one
+    that goes back is the validated declaration's.
+    """
+    kept = [dict(label) for label in current if not _is_project_classification(label)]
+    return [*kept, classification_tag_label(classification)]
+
+
+def _is_project_classification(label: Mapping[str, object]) -> bool:
+    fqn = label.get("tagFQN")
+    return (
+        label.get("source") == "Classification"
+        and isinstance(fqn, str)
+        and fqn.startswith(f"{CLASSIFICATION_NAME}.")
+    )
 
 
 def classification_tag_description(classification: Classification) -> str:

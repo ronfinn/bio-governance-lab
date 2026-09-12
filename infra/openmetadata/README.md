@@ -7,7 +7,9 @@ git-ignored. Upstream is not vendored.
 
 Docker Desktop (or another Docker engine) with **at least 6 GB of memory** is
 the documented requirement; the stack below fits in 4 GB with the ingestion
-container left out, which this integration does not need.
+container left out, which this integration does not need. It does not fit
+beside a running DataHub quickstart in a 6 GB Docker VM: stop DataHub's
+containers first (`docker stop` keeps its data), or give Docker more memory.
 
 ## Get the compose file
 

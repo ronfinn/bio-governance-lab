@@ -307,8 +307,8 @@ the static assertions about parameters and process names run everywhere.
 
 **OpenMetadata's REST API, not its Python SDK.** `openmetadata-ingestion`
 resolves to around 130 transitive packages for this environment — dbt-core,
-boto3, grpcio, numpy and the Kubernetes client among them — to issue eight kinds
-of request, five of them writes, against documented endpoints. The REST API is the same interface
+boto3, grpcio, numpy and the Kubernetes client among them — to issue ten kinds
+of request, six of them writes, against documented endpoints. The REST API is the same interface
 the SDK calls, so the client calls it over `httpx` and the dependency list stays
 readable. The SDK becomes the right answer when this project needs ingestion
 workflows or connectors; publishing seven containers is not that. A local
@@ -335,10 +335,26 @@ to a second OpenMetadata and every FQN changes while no `bio://` identifier does
 Replacing `AssetIdentifier` with an FQN would have made a deployment detail into
 the project's notion of identity.
 
-**Idempotence is a property of the requests.** Every write is a `PUT`, and
-OpenMetadata's `PUT` routes are create-or-update, so publishing twice addresses
-the same entities. There is no read-then-decide step and no local record of what
-was published — both would be state this project would then have to keep true.
+**Idempotence is a property of the requests.** Every write but one is a `PUT`,
+and OpenMetadata's `PUT` routes are create-or-update, so publishing twice
+addresses the same entities. There is no read-then-decide step and no local
+record of what was published — both would be state this project would then have
+to keep true.
+
+**A classification is set by a `PATCH`, because a `PUT` can only add one.**
+OpenMetadata merges a `PUT`'s tags into the container's, so on the live 1.13.4
+server a changed classification was refused with HTTP 400 rather than applied
+(milestone 13). Idempotent is not the same as convergent: the merging `PUT`
+repeated an unchanged declaration perfectly and could never reach a changed one.
+So the container `PUT` carries no tags, and one JSON Patch `add` of `/tags` sets
+the list to every label outside `bio_governance_classification`, unchanged, plus
+the declared value. The read that precedes it decides which labels to keep, not
+whether to write, and the declaration remains the only source of the value —
+the catalogue's current classification is discarded, never consulted. The
+project owns one namespace on a container and touches nothing else, which is why
+the alternatives — deleting every tag, or OpenMetadata's asynchronous bulk tag
+removal — were rejected. There is no generic patch layer: one operation on one
+path is the whole of it.
 
 **Only lineage edges that can be stated in a sentence.** Six per study: each raw
 file to the curated copy made from it, and all three raw files to the report that

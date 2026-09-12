@@ -3,14 +3,16 @@
 OpenMetadata ships an official Python SDK, ``openmetadata-ingestion``. It is
 not used here. Resolving it for this project's Python brings in around 130
 transitive packages — dbt-core, boto3, grpcio, numpy and the Kubernetes client
-among them — for a client that issues eight kinds of request, five of them
+among them — for a client that issues ten kinds of request, six of them
 writes, against documented endpoints. The published REST API is the same interface the SDK
 calls, so this module calls it directly over ``httpx`` and the project keeps a
 dependency list a reader can hold in their head.
 
-Every write is a ``PUT``. OpenMetadata's ``PUT`` routes are create-or-update, so
-publishing twice updates the same entities instead of creating a second set;
-idempotence is a property of the requests, not of bookkeeping this module does.
+Every write but one is a ``PUT``. OpenMetadata's ``PUT`` routes are
+create-or-update, so publishing twice updates the same entities instead of
+creating a second set; idempotence is a property of the requests, not of
+bookkeeping this module does. The exception is a container's classification,
+which a ``PUT`` cannot change — see :meth:`OpenMetadataClient.classify_container`.
 
 The token is never logged, never echoed and never included in an error message.
 """
@@ -22,8 +24,9 @@ from typing import Any
 
 import httpx
 
-from bio_governance.catalog.mapping import classification_tag_fqn
+from bio_governance.catalog.mapping import classified_tags
 from bio_governance.catalog.models import CatalogAsset, CatalogError, OpenMetadataConfig
+from bio_governance.models import Classification
 
 #: How long any single call may take. A local server that has not answered in
 #: half a minute is not a slow server, it is a stopped one.
@@ -31,6 +34,9 @@ DEFAULT_TIMEOUT = 30.0
 
 #: OpenMetadata's entity type name for a container, used by the lineage API.
 CONTAINER_TYPE = "container"
+
+#: The media type OpenMetadata's PATCH routes require (RFC 6902).
+JSON_PATCH = "application/json-patch+json"
 
 
 class OpenMetadataClient:
@@ -148,17 +154,17 @@ class OpenMetadataClient:
         The ID is what the lineage API works in, so publishing an edge needs
         the containers to exist first.
 
-        A classified asset carries its classification as a tag label, which is
-        why the classification's tags must exist before any container does.
-        ``asset.ownership`` is deliberately not sent: OpenMetadata's ``owners``
-        are references, by server-assigned UUID, to Users or Teams it already
-        holds, and this project provisions neither.
+        No tags are sent. On a ``PUT``, OpenMetadata *merges* the request's tags
+        into those the container already has and then enforces mutual
+        exclusivity, so a ``PUT`` can add a classification but never replace
+        one: against 1.13.4, re-sending ``internal`` is a no-op and sending
+        ``confidential`` to an ``internal`` container is refused with HTTP 400.
+        The classification is therefore set afterwards, by
+        :meth:`classify_container`.
 
-        On a ``PUT``, OpenMetadata *merges* the request's tags into those the
-        container already has, then enforces mutual exclusivity. Re-sending the
-        same classification is therefore a no-op, and a changed one is refused
-        rather than silently doubled: the server will not hold two tags of a
-        mutually exclusive classification.
+        ``asset.ownership`` is deliberately not sent either: OpenMetadata's
+        ``owners`` are references, by server-assigned UUID, to Users or Teams it
+        already holds, and this project provisions neither.
         """
         body: dict[str, Any] = {
             "name": asset.name,
@@ -171,15 +177,6 @@ class OpenMetadataClient:
         }
         if asset.size_bytes is not None:
             body["size"] = asset.size_bytes
-        if asset.classification is not None:
-            body["tags"] = [
-                {
-                    "tagFQN": classification_tag_fqn(asset.classification),
-                    "source": "Classification",
-                    "labelType": "Manual",
-                    "state": "Confirmed",
-                }
-            ]
         if asset.columns:
             body["dataModel"] = {
                 "isPartitioned": False,
@@ -195,6 +192,45 @@ class OpenMetadataClient:
 
         payload = self._request("PUT", "/v1/containers", json=body)
         return _text(payload, "id", f"container {asset.name}")
+
+    def classify_container(self, container_id: str, classification: Classification) -> None:
+        """Set a container's project classification to ``classification``, and nothing else.
+
+        One read and one JSON Patch. The read fetches the labels the container
+        holds now; :func:`classified_tags` keeps every one outside
+        ``bio_governance_classification`` untouched and sets the project's to
+        the declared value; the patch writes that list back as a single ``add``
+        of ``/tags``. Unlike a ``PUT``, a ``PATCH`` *replaces* the tag list, so
+        an old value of the classification is removed in the same request that
+        adds the new one, and mutual exclusivity is never violated.
+
+        The same request is sent whether or not anything changes. Patching a
+        container to the tags it already holds is a no-op on the server — no
+        new version, an empty change description — so there is no
+        read-then-decide step, and a republication sends what the last one did.
+
+        OpenMetadata's bulk ``PUT /v1/tags/{id}/assets/remove`` was the other
+        candidate, and is not used: it starts a background job and returns
+        before the tag is gone, so the publication would race its own request.
+        """
+        current = self._request(
+            "GET", f"/v1/containers/{container_id}", params={"fields": "tags"}
+        ).get("tags")
+        labels = current if isinstance(current, list) else []
+        self._request(
+            "PATCH",
+            f"/v1/containers/{container_id}",
+            json=[
+                {
+                    "op": "add",
+                    "path": "/tags",
+                    "value": classified_tags(
+                        [label for label in labels if isinstance(label, dict)], classification
+                    ),
+                }
+            ],
+            content_type=JSON_PATCH,
+        )
 
     def add_lineage(self, *, from_id: str, to_id: str) -> None:
         """Record that one container is upstream of another.
@@ -214,8 +250,13 @@ class OpenMetadataClient:
         )
 
     def get_container(self, fqn: str) -> dict[str, Any]:
-        """Fetch a published container, with its tags, by its fully qualified name."""
-        return self._request("GET", f"/v1/containers/name/{fqn}", params={"fields": "tags"})
+        """Fetch a published container, with its tags and owners, by its fully qualified name.
+
+        Owners are asked for so that their absence is something the server
+        said: OpenMetadata leaves out any field not named in ``fields``, so a
+        read without them would report no owners whatever the container held.
+        """
+        return self._request("GET", f"/v1/containers/name/{fqn}", params={"fields": "tags,owners"})
 
     def get_lineage(self, fqn: str, *, upstream: int = 1, downstream: int = 1) -> dict[str, Any]:
         """Fetch the lineage graph around a container, as OpenMetadata holds it."""
@@ -233,6 +274,7 @@ class OpenMetadataClient:
         json: Any | None = None,
         params: dict[str, Any] | None = None,
         authenticated: bool = True,
+        content_type: str | None = None,
     ) -> dict[str, Any]:
         """Issue one request, and turn every failure into a `CatalogError`.
 
@@ -241,6 +283,8 @@ class OpenMetadataClient:
         of this method's output.
         """
         headers = {}
+        if content_type is not None:
+            headers["Content-Type"] = content_type
         if authenticated:
             headers["Authorization"] = f"Bearer {self._config.require_token()}"
 

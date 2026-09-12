@@ -6,15 +6,17 @@ This repository is a public portfolio project exploring how data governance —
 ownership, classification, lineage, contracts and quality — can be expressed as
 typed, tested, version-controlled code rather than as documents in a wiki.
 
-> **Status: milestone 12 — ownership and classification evidence.** This
-> repository contains the core domain model, a deterministic generator for a
-> small synthetic study, a committed governance declaration per study stating
-> who owns it and how it is classified, YAML data contracts over the generated
-> CSVs, study-level data-quality checks, a Nextflow pipeline that puts all three
-> in front of curation as gates, OpenLineage events recording what a governed
-> run produced, publication of those governed assets — and their classification
-> and ownership — into a local OpenMetadata instance and into a local DataHub,
-> one deterministic READY/REVIEW/BLOCKED decision derived from all of that
+> **Status: milestone 13 — OpenMetadata live validation and classification
+> lifecycle.** This repository contains the core domain model, a deterministic
+> generator for a small synthetic study, a committed governance declaration per
+> study stating who owns it and how it is classified, YAML data contracts over
+> the generated CSVs, study-level data-quality checks, a Nextflow pipeline that
+> puts all three in front of curation as gates, OpenLineage events recording
+> what a governed run produced, publication of those governed assets — and
+> their classification and ownership — into a local OpenMetadata instance and
+> into a local DataHub, both tested live, with a changed classification
+> replacing the old one in OpenMetadata rather than being refused, one
+> deterministic READY/REVIEW/BLOCKED decision derived from all of that
 > evidence, a Model Context Protocol server that lets an AI assistant read that
 > decision without any way to change it, and a written
 > [case study](docs/catalog-comparison.md) comparing what the two catalogue
@@ -39,7 +41,9 @@ typed, tested, version-controlled code rather than as documents in a wiki.
 - [OpenLineage](https://openlineage.io/) START and COMPLETE events, written as
   local JSONL, recording which raw datasets a curated directory came from.
 - Publication of a study's seven governed assets, and the lineage between
-  them, into a local [OpenMetadata](https://open-metadata.org) instance.
+  them, into a local [OpenMetadata](https://open-metadata.org) instance —
+  including reclassification when a study's declaration changes, verified
+  against a live server without disturbing tags the project does not own.
 - The same seven assets and six edges published into a local
   [DataHub](https://datahubproject.io) — a second catalogue, modelled DataHub's
   way rather than OpenMetadata's, and deliberately not behind an interface.
@@ -459,10 +463,18 @@ is deliberately **not** sent: an OpenMetadata owner must be an existing user or
 team, addressed by a UUID the server assigned, and this project provisions no
 accounts. See [Governance metadata](docs/governance-metadata.md#openmetadata).
 
-Every write is a create-or-update `PUT`, so publishing twice updates the same
-seven containers, four tags and six edges rather than creating a second set.
-Publication refuses — before its first request — a study whose governance
-declaration is missing or did not validate.
+Entities are written with create-or-update `PUT`s, so publishing twice updates
+the same seven containers, four tags and six edges rather than creating a second
+set. The classification is the exception. A `PUT` merges tags, and against a
+live OpenMetadata 1.13.4 a changed declaration was refused with HTTP 400 ("…
+mutually exclusive and can't be assigned together"). So each container's tags
+are set by one JSON Patch instead: every tag outside
+`bio_governance_classification` is kept exactly as it was, and the project's
+classification becomes the declared value. `none → internal`, `internal →
+confidential`, `confidential → restricted` and `restricted → public` all land,
+and republishing any of them changes nothing. Publication refuses — before its
+first request — a study whose governance declaration is missing or did not
+validate.
 
 | Variable | Default |
 | --- | --- |
@@ -474,7 +486,7 @@ that one is set and its last four characters. Publication is an explicit
 post-run command — the pipeline still runs with OpenMetadata switched off.
 
 See [docs/openmetadata.md](docs/openmetadata.md) for the entity mapping, the
-REST-versus-SDK decision and what is deferred, and
+classification lifecycle, the REST-versus-SDK decision and what is deferred, and
 [infra/openmetadata/README.md](infra/openmetadata/README.md) for the local
 Docker deployment.
 
@@ -782,7 +794,8 @@ Nextflow checks its behaviour.
 - [Lineage](docs/lineage.md) — why OpenLineage, job/run/dataset, the local JSONL
   transport and what is deferred.
 - [OpenMetadata](docs/openmetadata.md) — containers and CustomStorage, the
-  `bio://`-to-FQN mapping, authentication, idempotence and lineage.
+  `bio://`-to-FQN mapping, authentication, idempotence, lineage, and the
+  classification lifecycle observed on a live server.
 - [DataHub](docs/datahub.md) — datasets and aspects, the `bio://`-to-URN
   mapping, Metadata Change Proposals, the SDK decision and idempotence.
 - [Catalogue comparison](docs/catalog-comparison.md) — the two integrations side
@@ -823,8 +836,11 @@ vocabulary and, in DataHub, the owner and steward. No OpenMetadata `Pipeline`,
 glossary, tier, owner, user, team or custom-property entities are created; no
 DataHub domains, tags, users, groups, assertions, data products, structured
 properties or forms are either, and there is no ingestion recipe, Kafka emitter
-or scheduled crawl. Nothing polls or reconciles, and a reclassification is not
-`PATCH`ed into OpenMetadata.
+or scheduled crawl. Nothing polls or reconciles. OpenMetadata receives exactly
+one `PATCH` — the one that sets a container's classification — and there is no
+general patching, entity diffing or catalogue-to-declaration sync; the
+catalogue's classification is overwritten from the declaration on the next
+publication, never read back as governance state.
 
 There is still no catalogue abstraction layer, and after writing the comparison
 there is a better reason than before. An interface over the two would have to

@@ -13,7 +13,7 @@ of those can: it looks at the directories, refuses to catalogue anything that is
 not actually there, and then puts the two together.
 
 The order matters. The service must exist before its containers, the
-classification's tags before a container that carries one, and the containers
+classification's tags before a container is classified, and the containers
 before an edge between them, because OpenMetadata's lineage API works in entity
 IDs.
 
@@ -93,6 +93,10 @@ def publish_study(
     service, classification, tag, container and lineage routes are all
     create-or-update, so a second run leaves seven containers, four tags and
     six edges, not fourteen, eight and twelve.
+
+    Re-running after the declaration's classification changed reclassifies:
+    each container ends up holding the new value and not the old one, and
+    every tag outside the project's classification is left where it was.
     """
     study_id = study_id_from(raw_dir)
     sizes = asset_sizes(study_id, raw_dir, results_dir)
@@ -126,7 +130,14 @@ def publish_study(
             classification=classification,
             description=classification_tag_description(value),
         )
-    ids = {asset.identifier: client.upsert_container(asset, service=service) for asset in assets}
+    ids: dict[str, str] = {}
+    for asset in assets:
+        ids[asset.identifier] = client.upsert_container(asset, service=service)
+        # Straight after its PUT, so a new container is unclassified only for
+        # the read and patch that follow, and an existing one moves from its old
+        # value to the declared one in a single PATCH rather than being refused
+        # by a merge.
+        client.classify_container(ids[asset.identifier], governance.classification)
     for edge in edges:
         client.add_lineage(
             from_id=ids[edge.from_identifier],

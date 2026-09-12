@@ -682,7 +682,9 @@ def catalog_publish(
     classification its validated governance declaration states — and the six
     lineage edges this project can explain. Ownership is not sent: OpenMetadata
     owners must be users or teams it already holds. Running it twice updates the
-    same entities rather than creating a second set. Exits 0 on success and 2
+    same entities rather than creating a second set, and running it after the
+    declaration's classification changed replaces the old classification tag,
+    leaving every other tag alone. Exits 0 on success and 2
     when the catalogue could not be reached, a claimed file is missing, or the
     governance declaration is missing or did not validate.
     """

@@ -230,17 +230,22 @@ with `mutuallyExclusive: true` — OpenMetadata's distinction between
 declared value as a tag label:
 
 ```
-PUT /v1/classifications   bio_governance_classification   mutuallyExclusive: true
-PUT /v1/tags              public | internal | confidential | restricted
-PUT /v1/containers        ... "tags": [{"tagFQN": "bio_governance_classification.internal",
-                                        "source": "Classification", "labelType": "Manual",
-                                        "state": "Confirmed"}]
+PUT   /v1/classifications   bio_governance_classification   mutuallyExclusive: true
+PUT   /v1/tags              public | internal | confidential | restricted
+PUT   /v1/containers        ... no tags
+GET   /v1/containers/{id}?fields=tags
+PATCH /v1/containers/{id}   [{"op": "add", "path": "/tags", "value": [...other labels...,
+                              {"tagFQN": "bio_governance_classification.internal",
+                               "source": "Classification", "labelType": "Manual",
+                               "state": "Confirmed"}]}]
 ```
 
 All four tags are created, not only the one in use: a mutually exclusive
 classification with one member would not say what the alternatives are. Tags
-must exist before a container can carry one, so publication now runs service,
-classification, tags, containers, edges.
+must exist before a container can carry one, so publication runs service,
+classification, tags, then each container's `PUT` and classification, then
+edges. (Milestone 12 sent the tag label inside the container `PUT`; milestone 13
+moved it into the `PATCH`, for the reason under *Write semantics* below.)
 
 **Ownership — deliberately not sent.** An OpenMetadata owner is an
 `EntityReference` whose `id` is required: the server-assigned UUID of a User,
@@ -260,13 +265,32 @@ outside this project. Two workarounds were considered and rejected:
 So ownership stays canonical in the declaration and absent from OpenMetadata,
 and `catalog openmetadata publish` says so in its summary.
 
-**Write semantics.** On a `PUT`, `EntityRepository.updateTags` *merges* the
-request's tags into those the container already holds and then enforces mutual
-exclusivity. Republishing the same classification is therefore a no-op, and a
-tag someone added in the UI survives. A *changed* classification is refused
-(both values would be present, and the classification is mutually exclusive)
-rather than silently doubled; applying a reclassification would need a `PATCH`,
-which this integration does not send.
+**Write semantics.** On a `PUT`, OpenMetadata *merges* the request's tags into
+those the container already holds and then enforces mutual exclusivity.
+Milestone 12 read that from the 1.13.4 source and predicted three consequences;
+milestone 13 observed all three on the live server. Republishing the same
+classification is a no-op. A tag somebody added in the UI survives. And a
+*changed* classification is refused — a `confidential` declaration published
+over `internal` containers got HTTP 400, "Tag labels
+bio_governance_classification.internal and
+bio_governance_classification.confidential are mutually exclusive and can't be
+assigned together", and nothing on the server changed.
+
+That separates **initial classification**, which a merge can do, from
+**reclassification**, which it cannot. So the container `PUT` no longer carries
+tags, and the classification is set by a JSON Patch that *replaces* the tag
+list: every label outside `bio_governance_classification` exactly as the server
+returned it, then the declared value. The old value is removed in the same
+request that adds the new one; `PII`, `Tier`, glossary terms and a steward's
+tags are left alone, because the project owns only its own classification's
+namespace. The same `PATCH` is sent whether or not anything changed, and a
+`PATCH` to the tags a container already holds was observed to be a no-op, so
+publication stays idempotent without deciding anything from the catalogue's
+state. The five transitions — `none → internal`, `internal → internal`,
+`internal → confidential`, `confidential → restricted`, `restricted → public` —
+were each published twice against the live server with a steward's tag in
+place; [openmetadata.md](openmetadata.md#classification-lifecycle) has the
+table.
 
 ### DataHub
 
@@ -315,16 +339,17 @@ means in DataHub's model.
 | steward | **not sent** — no steward role on containers | `DATA_STEWARD` in the `ownership` aspect |
 | principal | must be provisioned first | a URN the client derives; no account |
 | contact | not sent | not sent |
-| republish, same declaration | tags merged: no change | aspects replaced: no change |
-| republish, changed classification | refused: mutually exclusive | the term is replaced |
-| a tag or owner added in the UI | survives a republish | overwritten by a republish |
-| governance writes per publication | 5 more `PUT`s (1 + 4) | 19 more proposals (1 + 4 + 7 + 7) |
+| republish, same declaration | tag list re-set to itself: no change | aspects replaced: no change |
+| republish, changed classification | old tag replaced by one `PATCH` of `/tags` (milestone 12: refused by the `PUT`) | the term is replaced |
+| a tag or owner added in the UI | a tag survives a republish | overwritten by a republish |
+| governance requests per publication | 5 `PUT`s (1 + 4), 7 `GET`s, 7 `PATCH`es | 19 more proposals (1 + 4 + 7 + 7) |
 
-One publication of BIO-001 is now **19** `PUT`s to OpenMetadata (1 service, 1
-classification, 4 tags, 7 containers, 6 edges) and **42** Metadata Change
-Proposals to DataHub (1 platform, 1 glossary node, 4 terms, 7 × properties,
-subtype, ownership and terms, 4 schemas, 4 lineage aspects). Both counts are
-asserted in the idempotence tests.
+One publication of BIO-001 is now **33** requests to OpenMetadata (1 service, 1
+classification, 4 tags, 7 × container `PUT`, tag `GET` and classification
+`PATCH`, 6 edges — 26 of them writes) and **42** Metadata Change Proposals to
+DataHub (1 platform, 1 glossary node, 4 terms, 7 × properties, subtype,
+ownership and terms, 4 schemas, 4 lineage aspects). Both counts are asserted in
+the idempotence tests. (Milestone 12's OpenMetadata count was 19 `PUT`s.)
 
 This is the milestone-11 finding reappearing in governance. Who owns a primary
 key decided how lineage was addressed; here it decides whether ownership can be
@@ -353,17 +378,23 @@ half of it is not there at all, which costs the governance record nothing.
 - DataHub: `tests/test_catalog_datahub_live.py` against the local v1.7.0
   quickstart, which now also asserts the owners and the glossary term on every
   dataset after two publications.
-- OpenMetadata: mocked only in this milestone; the local instance was not
-  running. `tests/test_catalog_live.py` now also asserts the classification tag
-  and the absence of owners, and has not yet been run. The `PUT` behaviours
-  quoted above — owners by UUID, tag merging, mutual exclusivity, a bot's
-  description revert — were read from OpenMetadata 1.13.4's
-  `EntityRepository.java` and `TagLabelUtil.java`, not observed.
+- OpenMetadata: mocked only in milestone 12, then run live in milestone 13
+  against the local 1.13.4 quickstart. `tests/test_catalog_live.py` asserts the
+  classification tag, `"owners": []` read back with owners requested (milestone
+  12's version read containers with `fields=tags` only, and OpenMetadata then
+  omits `owners` entirely, so that assertion could not have failed), an
+  identical read-back after a second publication, and the five-transition
+  reclassification walk with a steward's tag preserved throughout. Tag merging on
+  `PUT`, mutual exclusivity and the refused reclassification are therefore now
+  observed, not inferred. Owners-by-UUID and a bot's description revert are
+  still read from 1.13.4's `EntityRepository.java`: nothing this project sends
+  exercises them.
 
 ## Deliberately not done
 
-Retention, access control and catalogue presence are still not checks. There is
-no OpenMetadata `PATCH` for reclassification, no user, team or group entity in
+Retention, access control and catalogue presence are still not checks. The one
+OpenMetadata `PATCH` sets the classification and nothing else — no general
+patching, diffing or reconciliation. There is no user, team or group entity in
 either catalogue, no DataHub domains, tags, structured properties or custom
 ownership types, no notion of what a classification permits, and no approval,
 notification or stewardship workflow.

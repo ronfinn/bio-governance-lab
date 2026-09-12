@@ -118,6 +118,27 @@ def validate_declaration(
     return path
 
 
+def declare_classification(
+    study: Path, results: Path, tmp_path: Path, classification: Classification
+) -> Path:
+    """Judge a copy of the study's declaration that states another classification.
+
+    Shared by the mocked and live catalogue tests of reclassification. The
+    committed declaration is never edited: the copy is written under tmp_path,
+    and the evidence is still the validator's own verdict.
+    """
+    committed = GOVERNANCE_DIR / f"{study.name}.yaml"
+    declaration = tmp_path / "declarations" / classification.value / committed.name
+    declaration.parent.mkdir(parents=True, exist_ok=True)
+    text = committed.read_text(encoding="utf-8")
+    assert "\nclassification: internal\n" in text
+    declaration.write_text(
+        text.replace("\nclassification: internal\n", f"\nclassification: {classification.value}\n"),
+        encoding="utf-8",
+    )
+    return validate_declaration(study, results, declaration)
+
+
 def build_results(tmp_path: Path) -> Path:
     """Produce, under tmp_path, the results directory a clean pipeline run leaves.
 
