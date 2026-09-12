@@ -12,12 +12,20 @@ by :mod:`bio_governance.catalog.client`. This module does the one thing neither
 of those can: it looks at the directories, refuses to catalogue anything that is
 not actually there, and then puts the two together.
 
-The order matters. The service must exist before its containers, and the
-containers must exist before an edge between them, because OpenMetadata's
-lineage API works in entity IDs.
+The order matters. The service must exist before its containers, the
+classification's tags before a container that carries one, and the containers
+before an edge between them, because OpenMetadata's lineage API works in entity
+IDs.
 
-The four public helpers below — which study this is, which files it consists of,
-which run produced them and which contracts describe them — are shared with
+The study's governance declaration is evidence like the quality report is, and
+is checked the same way: before the first request. Only a declaration that
+validated is projected. A catalogue that showed an owner or a classification the
+governance layer had rejected would be making exactly the unsupported claim the
+rest of this project exists to prevent.
+
+The five public helpers below — which study this is, which files it consists of,
+which run produced them, which contracts describe them and what the study's
+governance declaration says — are shared with
 :mod:`bio_governance.catalog.datahub_publish`. Which files exist is a fact about
 the study, not about a catalogue, and two catalogues that answered it separately
 would eventually answer it differently.
@@ -28,19 +36,30 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from bio_governance.catalog.client import OpenMetadataClient
 from bio_governance.catalog.mapping import (
+    CLASSIFICATION_DESCRIPTION,
+    CLASSIFICATION_DISPLAY_NAME,
+    CLASSIFICATION_NAME,
     SERVICE_DESCRIPTION,
     SERVICE_DISPLAY_NAME,
     SERVICE_NAME,
     SERVICE_TYPE,
+    classification_tag_description,
     lineage_edges,
     prepare_assets,
 )
 from bio_governance.catalog.models import CatalogError, PublishedCatalog
 from bio_governance.contracts import ContractError, DataContract, load_contract
+from bio_governance.governance import (
+    METADATA_EVIDENCE,
+    GovernanceMetadata,
+    MetadataValidationResult,
+)
 from bio_governance.lineage import CURATED_STAGE, DATASET_FILES, QUALITY_DATASET, RAW_STAGE
-from bio_governance.models import AssetIdentifier
+from bio_governance.models import AssetIdentifier, Classification
 
 #: Where the pipeline's outputs sit under a results directory.
 CURATED_SUBDIR = "curated"
@@ -61,25 +80,30 @@ def publish_study(
     *,
     contract_dir: Path | None = None,
 ) -> PublishedCatalog:
-    """Publish a study's seven governed assets and their lineage.
+    """Publish a study's seven governed assets, their classification and their lineage.
 
     ``raw_dir`` is the generated study, ``results_dir`` the pipeline output that
-    holds ``curated/``, ``quality/dq-report.json`` and ``lineage/``. Every file
-    the catalogue will claim is checked first: a catalogue entry for a file that
-    was never written is worse than no entry at all.
+    holds ``curated/``, ``quality/dq-report.json``, ``lineage/`` and
+    ``metadata/governance-metadata.json``. Every file the catalogue will claim
+    is checked first, and the governance declaration must have validated: a
+    catalogue entry for a file that was never written, or carrying a
+    classification nobody validated, is worse than no entry at all.
 
-    Re-running against the same directories updates the same entities. Both the
-    container and the lineage routes are create-or-update, so a second run
-    leaves seven containers and six edges, not fourteen and twelve.
+    Re-running against the same directories updates the same entities. The
+    service, classification, tag, container and lineage routes are all
+    create-or-update, so a second run leaves seven containers, four tags and
+    six edges, not fourteen, eight and twelve.
     """
     study_id = study_id_from(raw_dir)
     sizes = asset_sizes(study_id, raw_dir, results_dir)
+    governance = governance_metadata(results_dir, study_id)
     run_id = lineage_run_id(results_dir / LINEAGE_EVENTS)
 
     assets = prepare_assets(
         study_id,
         sizes=sizes,
         contracts=load_contracts(contract_dir or DEFAULT_CONTRACT_DIR),
+        governance=governance,
     )
     edges = lineage_edges(study_id)
 
@@ -89,6 +113,19 @@ def publish_study(
         display_name=SERVICE_DISPLAY_NAME,
         description=SERVICE_DESCRIPTION,
     )
+    # The whole vocabulary, not only the value in use: a mutually exclusive
+    # classification with one member would not say what the others are.
+    classification = client.upsert_classification(
+        name=CLASSIFICATION_NAME,
+        display_name=CLASSIFICATION_DISPLAY_NAME,
+        description=CLASSIFICATION_DESCRIPTION,
+    )
+    for value in Classification:
+        client.upsert_tag(
+            name=value.value,
+            classification=classification,
+            description=classification_tag_description(value),
+        )
     ids = {asset.identifier: client.upsert_container(asset, service=service) for asset in assets}
     for edge in edges:
         client.add_lineage(
@@ -101,6 +138,7 @@ def publish_study(
         service=service,
         assets=assets,
         edges=edges,
+        governance=governance,
         lineage_run_id=run_id,
     )
 
@@ -146,6 +184,43 @@ def _size(path: Path, label: str) -> int:
     if not path.is_file():
         raise CatalogError(f"{label} is missing {path}")
     return path.stat().st_size
+
+
+def governance_metadata(results_dir: Path, study_id: str) -> GovernanceMetadata:
+    """The study's validated governance declaration, read from the pipeline's evidence.
+
+    Read from ``results_dir``, as the governance evaluation reads it, rather
+    than from ``governance/studies/``: the evidence is the declaration *as the
+    gate judged it*, and publishing straight from the YAML would let a
+    catalogue carry a declaration no gate ever saw. The result is deserialized
+    into the model that produced it, so ``passed`` is the validator's verdict.
+
+    Absent, unreadable, failed or about another study are all refusals, raised
+    before a single request is sent.
+    """
+    path = results_dir / METADATA_EVIDENCE
+    if not path.is_file():
+        raise CatalogError(
+            f"governance metadata evidence is missing: {path} "
+            "(written by 'bio-gov governance metadata validate --json-out')"
+        )
+    try:
+        result = MetadataValidationResult.model_validate_json(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise CatalogError(f"cannot read {path}: {exc.strerror or exc}") from exc
+    except ValidationError as exc:
+        raise CatalogError(f"{path} is not a governance metadata validation result") from exc
+
+    if result.study_id != study_id:
+        raise CatalogError(f"{path} describes {result.study_id}, not {study_id}")
+    metadata = result.metadata
+    if metadata is None:
+        problems = "; ".join(problem.message for problem in result.problems)
+        raise CatalogError(
+            f"the governance declaration for {study_id} did not validate, "
+            f"so it is not published: {problems}"
+        )
+    return metadata
 
 
 def lineage_run_id(events: Path) -> str | None:

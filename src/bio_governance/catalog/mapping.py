@@ -22,6 +22,22 @@ container's ``fullPath``, where it stays visible and searchable::
 The seven assets are the same seven the lineage layer already names, imported
 rather than restated so the catalogue cannot drift from the provenance.
 
+A study's validated governance declaration is projected too, and only half of it
+fits. Its **classification** has an exact home: OpenMetadata's own word for a
+controlled, mutually exclusive tag vocabulary is a *Classification*, so the
+project's four values become the four tags of one ``bio_governance_classification``
+and each container carries the declared one::
+
+    classification: internal
+      tag  bio_governance_classification.internal
+
+Its **ownership** does not. An OpenMetadata owner is a reference, by server-
+assigned UUID, to a User or Team the server already holds; the declaration
+names people, and creating or looking up accounts for them would be user
+provisioning. So ownership is deliberately not sent, and stays canonical in the
+declaration. ``docs/governance-metadata.md`` records why the alternatives — a
+sentence in the description, a custom property — were not taken either.
+
 Nothing in this module performs IO or speaks HTTP.
 """
 
@@ -34,13 +50,14 @@ from bio_governance.catalog.models import (
     LineageEdge,
 )
 from bio_governance.contracts import ColumnType, DataContract
+from bio_governance.governance import GovernanceMetadata
 from bio_governance.lineage import (
     CURATED_STAGE,
     DATASET_FILES,
     QUALITY_DATASET,
     RAW_STAGE,
 )
-from bio_governance.models import AssetIdentifier
+from bio_governance.models import AssetIdentifier, Classification
 
 #: The one storage service every governed asset is published under.
 SERVICE_NAME = "bio_governance_lab"
@@ -50,6 +67,17 @@ SERVICE_DESCRIPTION = (
     "Governed synthetic life-sciences assets produced by bio-governance-lab. "
     "The files are local pipeline output, so they are catalogued as containers "
     "of a custom storage service rather than as tables of a database."
+)
+
+#: The OpenMetadata Classification the project's vocabulary is published as.
+#: Mutually exclusive, because an asset has one sensitivity, not several; that
+#: is OpenMetadata's own distinction between *classifying* and *categorising*.
+CLASSIFICATION_NAME = "bio_governance_classification"
+CLASSIFICATION_DISPLAY_NAME = "Bio Governance Classification"
+CLASSIFICATION_DESCRIPTION = (
+    "The sensitivity vocabulary of bio-governance-lab: public, internal, confidential "
+    "and restricted. Each asset carries the one its study's governance declaration "
+    "states. The declaration, committed in bio-governance-lab, is the canonical record."
 )
 
 #: What each dataset holds, in one sentence a steward can read in the catalogue.
@@ -83,6 +111,27 @@ def fully_qualified_name(identifier: AssetIdentifier) -> str:
     return f"{SERVICE_NAME}.{entity_name(identifier)}"
 
 
+def classification_tag_fqn(classification: Classification) -> str:
+    """The fully qualified name of the tag for one classification value.
+
+    The tag name is the vocabulary's own value, unchanged: ``internal`` is
+    ``bio_governance_classification.internal``, not a translation of it.
+    """
+    return f"{CLASSIFICATION_NAME}.{classification.value}"
+
+
+def classification_tag_description(classification: Classification) -> str:
+    """A tag's description. It says where the value comes from, not what it permits.
+
+    The project defines no access rules for its classifications, so the
+    catalogue is not given any to display.
+    """
+    return (
+        f"The '{classification.value}' value of bio-governance-lab's Classification "
+        "vocabulary, projected from a study's governance declaration."
+    )
+
+
 def study_identifiers(study_id: str) -> tuple[AssetIdentifier, ...]:
     """The seven governed identifiers of a study, raw then curated then quality."""
     staged = tuple(
@@ -98,20 +147,23 @@ def prepare_assets(
     *,
     sizes: dict[str, int] | None = None,
     contracts: dict[str, DataContract] | None = None,
+    governance: GovernanceMetadata | None = None,
 ) -> tuple[CatalogAsset, ...]:
     """Describe a study's seven governed assets as OpenMetadata containers.
 
     ``sizes`` maps a ``bio://`` URI to the byte size of the file behind it, and
     ``contracts`` maps a dataset name such as ``samples`` to the contract whose
-    declared columns become the container's data model. Both are optional: a
-    caller that has not read the files still gets the seven assets, because the
-    catalogue's shape is decided by the governance model rather than by what
-    happens to be on disk.
+    declared columns become the container's data model. ``governance`` is the
+    study's validated declaration, whose classification and ownership every
+    asset carries. All three are optional: a caller that has not read the files
+    still gets the seven assets, because the catalogue's shape is decided by
+    the governance model rather than by what happens to be on disk. Publication
+    is stricter, and refuses to run without the declaration.
     """
     sizes = sizes or {}
     contracts = contracts or {}
     return tuple(
-        _asset(identifier, sizes.get(identifier.uri), contracts)
+        _asset(identifier, sizes.get(identifier.uri), contracts, governance)
         for identifier in study_identifiers(study_id)
     )
 
@@ -142,6 +194,7 @@ def _asset(
     identifier: AssetIdentifier,
     size_bytes: int | None,
     contracts: dict[str, DataContract],
+    governance: GovernanceMetadata | None,
 ) -> CatalogAsset:
     stage, name = identifier.path[0], identifier.path[-1]
     if stage in (RAW_STAGE, CURATED_STAGE):
@@ -175,6 +228,8 @@ def _asset(
         file_format=file_format,
         columns=columns,
         size_bytes=size_bytes,
+        classification=governance.classification if governance else None,
+        ownership=governance.ownership if governance else None,
     )
 
 

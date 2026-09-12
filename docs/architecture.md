@@ -2,17 +2,20 @@
 
 ## Scope of this milestone
 
-This repository is at milestone 11: a tested Python foundation, a deterministic
-generator for a small synthetic study, YAML data contracts validated against the
-generated CSVs, study-level data-quality checks over the study as a whole, a
-Nextflow pipeline that runs both as gates in front of curation, OpenLineage
-events recording what a successful run produced, publication of those governed
-assets into a local OpenMetadata instance *and* into a local DataHub, one
-deterministic READY/REVIEW/BLOCKED decision derived from all of that evidence, a
-read-only Model Context Protocol server exposing that evidence to an AI client,
-and a written comparison of the two catalogue integrations. No history
-is kept, either catalogue is contacted only by an explicit post-run command, and
-the MCP server reads local files and nothing else.
+This repository is at milestone 12: a tested Python foundation, a deterministic
+generator for a small synthetic study, a committed governance declaration per
+study stating its owner, steward and classification, YAML data contracts
+validated against the generated CSVs, study-level data-quality checks over the
+study as a whole, a Nextflow pipeline that runs all three as gates in front of
+curation, OpenLineage events recording what a successful run produced,
+publication of those governed assets — and as much of their governance
+metadata as each catalogue can hold — into a local OpenMetadata instance *and*
+into a local DataHub, one deterministic READY/REVIEW/BLOCKED decision derived
+from seven checks over all of that evidence, a read-only Model Context Protocol
+server exposing that evidence to an AI client, and a written comparison of the
+two catalogue integrations. No history is kept, either catalogue is contacted
+only by an explicit post-run command, and the MCP server reads local files and
+nothing else.
 
 Everything that follows is designed to be added *on top of* this model rather
 than to replace it.
@@ -46,7 +49,8 @@ src/bio_governance/
     governance/
         __init__.py        public governance exports
         models.py          decision, status, check result, report
-        evaluate.py        the five checks over a results directory
+        evaluate.py        the seven checks over a results directory
+        metadata.py        the governance declaration and its validation
     catalog/
         __init__.py        public catalogue exports
         models.py          configuration, asset/edge records, result
@@ -61,6 +65,7 @@ src/bio_governance/
         evidence.py        reading the results root (no MCP import)
         server.py          the read-only tools, resources and annotations
 contracts/                 the contract definitions themselves (YAML)
+governance/studies/        one governance declaration per study (YAML)
 pipelines/nextflow/
     main.nf                gated curation, lineage and governance workflow (DSL2)
     nextflow.config        parameters, manifest, error strategy
@@ -205,7 +210,8 @@ Python, or to this process model. It also means the gate a reviewer reads in
 **The gates are enforced by the dataflow, not by a check inside a step.**
 `CURATE` takes its input from `RUN_DATA_QUALITY`'s output channel, which takes
 its input from `CONTRACT_GATE_SAMPLES`, which takes its input from
-`CONTRACT_GATE_COMPOUNDS`. There is no path by which a raw file reaches curation
+`CONTRACT_GATE_COMPOUNDS`, which since milestone 12 takes its input from
+`GOVERNANCE_METADATA_GATE`. There is no path by which a raw file reaches curation
 without every gate having succeeded first, so the guarantee is structural rather
 than a conditional somebody could remove. Structure is checked before
 consistency because a malformed file cannot meaningfully be assessed for
@@ -301,8 +307,8 @@ the static assertions about parameters and process names run everywhere.
 
 **OpenMetadata's REST API, not its Python SDK.** `openmetadata-ingestion`
 resolves to around 130 transitive packages for this environment — dbt-core,
-boto3, grpcio, numpy and the Kubernetes client among them — to issue five kinds
-of request against four documented endpoints. The REST API is the same interface
+boto3, grpcio, numpy and the Kubernetes client among them — to issue eight kinds
+of request, five of them writes, against documented endpoints. The REST API is the same interface
 the SDK calls, so the client calls it over `httpx` and the dependency list stays
 readable. The SDK becomes the right answer when this project needs ingestion
 workflows or connectors; publishing seven containers is not that. A local
@@ -393,19 +399,21 @@ use the study, not that it scored 0.82. `REVIEW` exists so a finding worth
 recording does not have to choose between blocking a pipeline and staying
 silent.
 
-**Five checks, and a closed enum rather than a policy engine.** The governance
+**Seven checks, and a closed enum rather than a policy engine.** The governance
 vocabulary is closed for the same reason the contract rules and the quality
 checks are: every finding has to be a named identifier something downstream can
-act on. No Rego, no rule language, no YAML-defined policies. Five checks do not
-need an engine, and building one before the sixth check exists would be guessing
-at what it needs.
+act on. No Rego, no rule language, no YAML-defined policies. Milestone 12 added
+the sixth and seventh checks as two enum members and two functions, which is the
+evidence that seven checks do not need an engine either.
 
-**A check must read real evidence.** Ownership, classification, retention,
-access control and catalogue presence would all be legitimate governance rules,
-and none of them is implemented, because nothing in this project produces
-evidence for any of them yet. A check with nothing to read is a check that
-always passes, which is worse than an absent one: it makes a report look more
-thorough than it is.
+**A check must read real evidence.** Ownership and classification sat in the
+domain model for eleven milestones without being checked, because nothing
+produced evidence for them: an `Asset` built with example values is not
+evidence that anybody owns anything. Milestone 12 made a committed declaration
+the evidence, and only then added the checks. Retention, access control and
+catalogue presence are still absent for the original reason. A check with
+nothing to read is a check that always passes, which is worse than an absent
+one: it makes a report look more thorough than it is.
 
 **Absent evidence is a verdict, not a crash.** A missing `dq-report.json`, an
 unparseable contract result, a deleted curated file, incoherent lineage — all
@@ -537,6 +545,67 @@ governance record never moved. The same derivation is also what makes both
 publications idempotent, which turns out to be a property of the mapping rather
 than of `PUT` or `UPSERT`.
 
+**Governance metadata is a declaration, not a contract.** Milestone 12's
+`governance/studies/<STUDY>.yaml` is YAML, like a contract, and shares none of
+the contract machinery. A contract is applied to data and describes one file's
+structure; a declaration states who answers for a whole study and how sensitive
+it is, and is itself the thing under test. Reusing the contract loader because
+both are YAML would have blurred the two layers the project has kept apart since
+milestone 3.
+
+**One vocabulary each, reused rather than restated.** The declaration's
+`ownership` validates into the domain model's `Ownership` and its
+`classification` into the `Classification` enum. A second ownership model for a
+file format would be two definitions of one thing that could drift. The cost is
+that `contact` is required, because `Ownership` requires it; the shipped
+declarations use `example.org`, which is reserved for documentation. `Ownership`
+was also closed (`extra="forbid"`), so a `team` field is refused rather than
+read around — the one change to the domain model this milestone made.
+
+**Judged against a study, and per part.** The study comes from the study
+directory's name, as in every other layer, so a valid declaration of `BIO-002`
+proves nothing about `BIO-001`. Every problem is attributed to the declaration
+as a whole, `study_id`, `ownership` or `classification`, which is what lets the
+governance evaluation report two checks rather than one: a wrong classification
+fails `classification` and leaves a valid `ownership` passing. Malformed YAML is
+exit 1, not 2 — it is defective evidence, which is a verdict; only a file or
+study that cannot be read at all has no verdict to give.
+
+**The metadata gate is first.** `GOVERNANCE_METADATA_GATE` feeds
+`CONTRACT_GATE_COMPOUNDS`, so nothing about a study's files is examined — let
+alone copied — until somebody is accountable for it and its sensitivity is
+known. Classification decides how data may be handled; checking it after
+curation would be checking it after the handling. The declaration is not opened
+with `checkIfExists`, so a missing one is reported by the gate that owns the
+question rather than by Nextflow declining to start.
+
+**No check decides what a classification permits.** A `restricted` study is as
+`READY` as a `public` one. The check establishes that responsibility and
+sensitivity were declared, validly, for this study. What each class allows is a
+policy, and a policy needs an engine, an owner and a vocabulary of actions this
+project does not have.
+
+**Catalogues project the evidence, not the file.** Publication reads the
+validated `metadata/governance-metadata.json` beside a run — through one helper
+both catalogues share — and refuses missing, failed or wrong-study evidence
+before the first request. Publishing straight from `governance/studies/` would
+let a catalogue carry a declaration no gate had judged.
+
+**Each catalogue gets what its model can honestly hold, and that is not the same
+amount.** OpenMetadata receives the classification as a mutually exclusive
+`Classification` with four tags — its own concept, under its own name — and does
+not receive ownership, because an OpenMetadata owner is a server-assigned UUID of
+a User or Group that must already exist, and this project provisions no
+accounts. DataHub receives the classification as a glossary term and the owner
+and steward as an `ownership` aspect, because an owner there is a URN the client
+derives and DataHub accepts one for a user it has never seen. This is the
+milestone-11 finding about who owns a primary key, reappearing one layer up: it
+decided how lineage was addressed, and here it decides whether ownership can be
+expressed at all. Hiding the difference behind a common interface would have
+meant either inventing OpenMetadata users or discarding DataHub's steward role.
+[governance-metadata.md](governance-metadata.md) records the difference, and the
+workarounds that were rejected.
+
 ## Deliberate non-goals for now
 
 No repository or service abstraction layer, no plugin system, no configuration
@@ -601,3 +670,8 @@ integration existing.
 to consume. It is a structured verdict with a message per check, serialized
 beside every run, so an explanation layer has something to explain rather than a
 report to parse — and no way to disagree with it.
+
+`MetadataValidationResult` is the seventh. It is the only evidence in the
+results directory that is not about the files, and both catalogues read it the
+way the evaluator does — into the model that produced it, so neither can project
+a declaration its own validator rejected.

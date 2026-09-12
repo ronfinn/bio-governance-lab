@@ -23,9 +23,13 @@ class Ownership(BaseModel):
 
     ``owner`` is accountable for the asset existing; ``steward`` is responsible
     for its day-to-day quality and correctness.
+
+    Closed: a field nobody defined is refused rather than ignored, because an
+    ownership record that silently drops ``escalation`` or ``team`` would look
+    like evidence for something nothing reads.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     owner: str = Field(min_length=1)
     steward: str = Field(min_length=1)

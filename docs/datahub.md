@@ -85,7 +85,7 @@ reader of the catalogue can get to it without knowing the rule.
 
 ## What is published
 
-Seven datasets, one platform, four lineage aspects:
+Seven datasets, one platform, a four-term glossary, four lineage aspects:
 
 ```
 DataPlatform  urn:li:dataPlatform:bio_governance_lab
@@ -113,11 +113,26 @@ Each dataset carries:
   The expression matrix is wide and generated; hundreds of schema fields would
   be noise, and no contract declares them.
 
-And nothing else. There are no domains, glossary terms, owners, tags, assertions,
-data products, structured properties or forms — not because DataHub does them
-badly, but because inventing them on one side would distort the comparison the
-next milestone is for. Ownership and classification become catalogue entities
-when this project produces evidence for them.
+Since milestone 12, each dataset also carries the study's validated governance
+declaration:
+
+- **`ownership`** — the owner as a `BUSINESS_OWNER` and the steward as a
+  `DATA_STEWARD`, each a corpuser URN built by the SDK's `make_user_urn(name)`.
+  No user is created: DataHub accepts an owner URN for a user it has never seen,
+  as it accepts an upstream it has never seen (verified against the local
+  v1.7.0 quickstart). `contact` is not projected.
+- **`glossaryTerms`** — the declared classification, as a term under the
+  `bio_governance_classification` glossary node, which publication defines along
+  with all four of its terms. Glossary terms, not tags, because DataHub's tags
+  are informal labels and its glossary is its controlled vocabulary for
+  governance. The audit stamp is the SDK's own, `urn:li:corpuser:__ingestion`
+  at time `0`, so no clock enters a proposal.
+
+And nothing else. There are no domains, tags, users, groups, assertions, data
+products, structured properties or forms. Publication refuses, before any
+proposal, a study whose declaration evidence is missing or did not validate.
+How this differs from OpenMetadata — which gets the classification but not the
+ownership — is in [governance-metadata.md](governance-metadata.md).
 
 The six edges are the six the project can explain in a sentence, exactly as in
 OpenMetadata:
@@ -140,7 +155,7 @@ find the JSONL corresponding to what the catalogue now holds.
 
 The OpenMetadata client in this package deliberately does **not** use that
 project's SDK. `openmetadata-ingestion` resolves to 135 packages — dbt-core,
-boto3, grpcio, the Kubernetes client — for five kinds of request against four
+boto3, grpcio, the Kubernetes client — for eight kinds of request against
 documented REST endpoints. The decision goes the other way for DataHub, and the
 reasoning is worth keeping:
 
@@ -218,8 +233,8 @@ catalogue does not judge a study.
 
 ## Idempotence
 
-Publishing `BIO-001` twice leaves seven datasets and six edges, not fourteen and
-twelve. This is not bookkeeping — nothing here records what was published
+Publishing `BIO-001` twice leaves seven datasets, four glossary terms and six
+edges, not fourteen, eight and twelve. This is not bookkeeping — nothing here records what was published
 before, and nothing reads before it writes:
 
 - Every URN is **derived** from a `bio://` identifier rather than assigned by
@@ -230,7 +245,10 @@ before, and nothing reads before it writes:
 Which is why the four lineage aspects matter: because an `upstreamLineage`
 aspect is a replacement, re-publishing cannot accumulate duplicate edges, and
 splitting the quality report's three upstreams across three proposals would have
-lost two of them every time.
+lost two of them every time. The same replacement governs `ownership` and
+`glossaryTerms`: a changed declaration replaces the owners and the term, including
+an owner someone added in the UI, because the declaration is canonical and the
+catalogue is its projection.
 
 ## The pipeline does not call this
 
@@ -249,9 +267,12 @@ CI never starts DataHub. `tests/test_catalog_datahub.py` fakes the *emitter* —
 the SDK boundary — and asserts on what this project actually controls: the
 configuration defaults, the `bio://`-to-URN derivation, the seven prepared
 datasets, the preserved canonical identity, the file formats, the contract-backed
-schemas, the exact six edges as four aspects, useful messages for a stopped
-server and a rejected token, and that a second publication proposes the same
-upserts against the same URNs.
+schemas, the exact six edges as four aspects, the glossary of four terms and the
+declared term on every dataset, the owner and data steward on every dataset, the
+refusal of missing, failed or wrong-study governance evidence, useful messages
+for a stopped server and a rejected token, and that a second publication
+proposes the same aspects against the same URNs — byte for byte, which is why
+the glossary terms' audit stamp is time `0` rather than the clock.
 
 What is faked is the emitter, not the metadata model. Every proposal the tests
 inspect is a real `MetadataChangeProposalWrapper` holding a real aspect class, so
@@ -262,15 +283,17 @@ identity costs nothing to import, and that is only safe while the convention
 agrees with DataHub's own.
 
 The live demonstration lives in `tests/test_catalog_datahub_live.py` and skips
-unless `DATAHUB_INTEGRATION_TEST=1`.
+unless `DATAHUB_INTEGRATION_TEST=1`. Since milestone 12 it also reads the owners
+and the glossary term back from every dataset after two publications; it passed
+against the local v1.7.0 quickstart.
 
 ## Deferred
 
 No ingestion sources, recipes or scheduled ingestion — this project *pushes*
 metadata, and has nothing for DataHub's connectors to crawl. No Kafka emitter:
 the REST emitter is synchronous, and a publication that has not reached the
-server is not a publication. No domains, glossary, tags, owners, assertions,
-data products, structured properties or forms. No `datahub` actions, no
+server is not a publication. No domains, tags, users, groups, custom ownership
+types, assertions, data products, structured properties or forms. No `datahub` actions, no
 policies, no soft deletes and no stateful ingestion. No DataHub Cloud.
 
 And no catalogue abstraction. Milestone 11 compares these two integrations; it

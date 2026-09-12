@@ -39,6 +39,20 @@ mapping prepares, imported rather than restated: two catalogues that disagreed
 about which assets exist would be comparing nothing. Only the identities differ,
 and they are computed here.
 
+The study's governance declaration is projected in DataHub's vocabulary, which
+is not OpenMetadata's:
+
+* **classification** becomes a **glossary term**. DataHub's tags are, in its own
+  documentation, informal labels; a controlled vocabulary for governance is a
+  business glossary, and DataHub's own classifier applies glossary terms. The
+  four values are terms under one ``bio_governance_classification`` node, and
+  each dataset's ``glossaryTerms`` aspect names the declared one.
+* **ownership** becomes the ``ownership`` aspect, with the owner as a
+  ``BUSINESS_OWNER`` and the steward as a ``DATA_STEWARD`` — DataHub has a
+  steward role of its own, where OpenMetadata has only "owners". An owner is a
+  URN, and DataHub accepts a URN for a user it has never seen, exactly as it
+  accepts an upstream dataset it has never seen, so no account is created.
+
 Nothing in this module performs IO, speaks HTTP, or imports the DataHub SDK.
 Keeping the SDK out of it is what lets the CLI read a configuration and derive a
 URN without importing a metadata model it is not going to send.
@@ -46,10 +60,10 @@ URN without importing a metadata model it is not going to send.
 
 from __future__ import annotations
 
-from bio_governance.catalog.mapping import lineage_edges, study_identifiers
+from bio_governance.catalog.mapping import CLASSIFICATION_NAME, lineage_edges, study_identifiers
 from bio_governance.catalog.models import CatalogAsset
 from bio_governance.lineage import CURATED_STAGE, QUALITY_DATASET, RAW_STAGE
-from bio_governance.models import AssetIdentifier
+from bio_governance.models import AssetIdentifier, Classification, Ownership
 
 #: The lineage layer names the quality report ``quality/dq-report``; its first
 #: segment is the third lifecycle stage, taken from there rather than restated
@@ -81,6 +95,32 @@ SUBTYPES = {
 
 #: The property that carries the project's identity into DataHub unchanged.
 CANONICAL_PROPERTY = "canonical_asset_id"
+
+#: The glossary node the classification vocabulary lives under. The same name
+#: the OpenMetadata Classification has: the vocabulary is the project's, and
+#: only the kind of entity that holds it differs between the catalogues.
+GLOSSARY_NODE_URN = f"urn:li:glossaryNode:{CLASSIFICATION_NAME}"
+GLOSSARY_NODE_DISPLAY_NAME = "Bio Governance Classification"
+GLOSSARY_NODE_DEFINITION = (
+    "The sensitivity vocabulary of bio-governance-lab: public, internal, confidential "
+    "and restricted. Each dataset carries the term its study's governance declaration "
+    "states. The declaration, committed in bio-governance-lab, is the canonical record."
+)
+
+#: Where a glossary term was defined, in DataHub's vocabulary: here, not in an
+#: external standard.
+TERM_SOURCE = "INTERNAL"
+
+#: Who applied the glossary terms, and when. DataHub's own SDK stamps terms with
+#: this actor and time zero (``datahub.sdk._shared``), and so does this project:
+#: the declaration carries no timestamp, and inventing one from the clock would
+#: make two publications of one declaration differ.
+TERMS_ACTOR = "urn:li:corpuser:__ingestion"
+TERMS_TIME = 0
+
+#: The DataHub ownership type each declared role becomes. Names match the SDK's
+#: ``OwnershipTypeClass`` constants, restated so this module stays SDK-free.
+OWNERSHIP_TYPES = (("owner", "BUSINESS_OWNER"), ("steward", "DATA_STEWARD"))
 
 
 def dataset_name(identifier: AssetIdentifier) -> str:
@@ -139,6 +179,30 @@ def custom_properties(asset: CatalogAsset) -> dict[str, str]:
 def subtype(asset: CatalogAsset) -> str:
     """The DataHub subtype for an asset, from its lifecycle stage."""
     return SUBTYPES[lifecycle_stage(AssetIdentifier.parse(asset.identifier))]
+
+
+def term_urn(classification: Classification) -> str:
+    """The glossary term for one classification value, named by the value itself."""
+    return f"urn:li:glossaryTerm:{CLASSIFICATION_NAME}.{classification.value}"
+
+
+def term_definition(classification: Classification) -> str:
+    """A term's definition. It says where the value comes from, not what it permits."""
+    return (
+        f"The '{classification.value}' value of bio-governance-lab's Classification "
+        "vocabulary, projected from a study's governance declaration."
+    )
+
+
+def owners(ownership: Ownership) -> tuple[tuple[str, str], ...]:
+    """Each declared person and the DataHub ownership type their role becomes.
+
+    Names, not URNs: a person's name may hold characters a URN must encode, and
+    the SDK's ``make_user_urn`` — used by the client — is the authority on how.
+    ``contact`` is not projected: an address belongs to a user's profile, and
+    this project creates no users.
+    """
+    return tuple((getattr(ownership, role), kind) for role, kind in OWNERSHIP_TYPES)
 
 
 def upstreams(study_id: str) -> dict[str, tuple[str, ...]]:

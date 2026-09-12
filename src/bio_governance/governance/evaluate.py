@@ -7,6 +7,7 @@ The pipeline leaves a results directory behind::
         quality/dq-report.json
         curated/{samples,compounds,expression}.csv
         lineage/openlineage.jsonl
+        metadata/governance-metadata.json
 
 This module reads exactly that, and nothing else. There is no clock, no network
 call, no catalogue lookup and no model: the same directory always produces the
@@ -32,6 +33,11 @@ from typing import Any
 from pydantic import ValidationError
 
 from bio_governance.contracts import ContractValidationResult
+from bio_governance.governance.metadata import (
+    MetadataField,
+    MetadataProblem,
+    MetadataValidationResult,
+)
 from bio_governance.governance.models import (
     GovernanceCheck,
     GovernanceCheckResult,
@@ -57,6 +63,7 @@ COMPOUNDS_EVIDENCE = "compounds.contract.json"
 CURATED_SUBDIR = "curated"
 QUALITY_REPORT = Path("quality") / "dq-report.json"
 LINEAGE_EVENTS = Path("lineage") / "openlineage.jsonl"
+METADATA_EVIDENCE = Path("metadata") / "governance-metadata.json"
 
 #: The OpenLineage run states one emission must consist of, exactly once each.
 REQUIRED_EVENTS = ("START", "COMPLETE")
@@ -101,6 +108,7 @@ def evaluate_governance(results_dir: Path) -> GovernanceReport:
             _quality_check(results_dir / QUALITY_REPORT),
             _curated_check(results_dir / CURATED_SUBDIR),
             _lineage_check(study_id, results_dir / LINEAGE_EVENTS),
+            *_metadata_checks(study_id, results_dir / METADATA_EVIDENCE),
         ),
     )
 
@@ -256,6 +264,74 @@ def _dataset_names(events: Sequence[dict[str, Any]], key: str) -> set[str]:
         for dataset in event.get(key) or ()
         if isinstance(dataset, dict)
     }
+
+
+def _metadata_checks(
+    study_id: str, path: Path
+) -> tuple[GovernanceCheckResult, GovernanceCheckResult]:
+    """Ownership and classification, each read from the validated declaration.
+
+    Both claims come from one evidence file, so evidence that is missing,
+    unreadable or about another study fails both — neither claim is evidenced.
+    Past that, each check fails only for problems with its own part of the
+    declaration, or with the declaration as a whole.
+
+    Neither check asks what a classification *permits*. A study classified
+    ``restricted`` passes exactly as one classified ``public`` does: the check
+    is that an accountable owner and a classification were declared, validly,
+    for this study. Deciding what each class allows would be a policy engine.
+    """
+    try:
+        result = MetadataValidationResult.model_validate(_read_json(path, "governance metadata"))
+    except _EvidenceError as exc:
+        return _both_fail(str(exc))
+    except ValidationError:
+        return _both_fail(f"{path} is not a governance metadata validation result")
+
+    if result.study_id != study_id:
+        return _both_fail(f"governance metadata evidence is for {result.study_id}, not {study_id}")
+
+    whole = (MetadataField.DECLARATION, MetadataField.STUDY_ID)
+    ownership_problems = result.problems_about(*whole, MetadataField.OWNERSHIP)
+    if ownership_problems or result.ownership is None:
+        ownership = _result(
+            GovernanceCheck.OWNERSHIP,
+            GovernanceCheckStatus.FAIL,
+            _problem_text(ownership_problems, "the declaration names no owner"),
+        )
+    else:
+        ownership = _result(
+            GovernanceCheck.OWNERSHIP,
+            GovernanceCheckStatus.PASS,
+            f"owner {result.ownership.owner}, steward {result.ownership.steward}, "
+            f"declared in {result.declaration.name}",
+        )
+
+    classification_problems = result.problems_about(*whole, MetadataField.CLASSIFICATION)
+    if classification_problems or result.classification is None:
+        classification = _result(
+            GovernanceCheck.CLASSIFICATION,
+            GovernanceCheckStatus.FAIL,
+            _problem_text(classification_problems, "the declaration carries no classification"),
+        )
+    else:
+        classification = _result(
+            GovernanceCheck.CLASSIFICATION,
+            GovernanceCheckStatus.PASS,
+            f"classified {result.classification.value}, declared in {result.declaration.name}",
+        )
+    return ownership, classification
+
+
+def _both_fail(message: str) -> tuple[GovernanceCheckResult, GovernanceCheckResult]:
+    return (
+        _result(GovernanceCheck.OWNERSHIP, GovernanceCheckStatus.FAIL, message),
+        _result(GovernanceCheck.CLASSIFICATION, GovernanceCheckStatus.FAIL, message),
+    )
+
+
+def _problem_text(problems: Sequence[MetadataProblem], fallback: str) -> str:
+    return "; ".join(problem.message for problem in problems) or fallback
 
 
 def _read_json(path: Path, label: str) -> Any:

@@ -14,12 +14,16 @@ catalogues do:
                      OpenMetadata                                DataHub
 ===================  ==========================================  ==========================
 container            storage service → container                 data platform → dataset
+classification       a tag of a mutually exclusive               a glossary term, under a
+                     Classification                              glossary node
+ownership            not sent: owners must be existing           ``ownership`` aspect, owner
+                     users or teams                              and data steward
 write                ``PUT`` an entity                           propose an aspect
 identity             FQN, with ``bio://`` in ``fullPath``        URN, with ``bio://`` in
                                                                  ``qualifiedName``
 lineage              one ``PUT`` per edge, in entity IDs         one aspect per downstream
                                                                  dataset, in URNs
-ordering             service, then containers, then edges        anything, then lineage
+ordering             service, tags, containers, then edges       anything, then lineage
 ===================  ==========================================  ==========================
 
 The ordering line is the one that shows the models apart. OpenMetadata's lineage
@@ -43,6 +47,7 @@ from bio_governance.catalog.publish import (
     DEFAULT_CONTRACT_DIR,
     LINEAGE_EVENTS,
     asset_sizes,
+    governance_metadata,
     lineage_run_id,
     load_contracts,
     study_id_from,
@@ -57,30 +62,36 @@ def publish_study_to_datahub(
     *,
     contract_dir: Path | None = None,
 ) -> PublishedCatalog:
-    """Publish a study's seven governed assets and their lineage to DataHub.
+    """Publish a study's seven governed assets, their governance and their lineage.
 
     ``raw_dir`` is the generated study, ``results_dir`` the pipeline output that
-    holds ``curated/``, ``quality/dq-report.json`` and ``lineage/``. Every file
-    the catalogue will claim is checked first: a catalogue entry for a file that
-    was never written is worse than no entry at all.
+    holds ``curated/``, ``quality/dq-report.json``, ``lineage/`` and
+    ``metadata/governance-metadata.json``. Every file the catalogue will claim
+    is checked first, and the governance declaration must have validated — by
+    the same helper the OpenMetadata publication uses, so the two catalogues
+    cannot disagree about whether a study's declaration may be projected.
 
     Re-running against the same directories updates the same entities. The URNs
-    are derived from the ``bio://`` identifiers rather than assigned by the
-    server, and every proposal is an upsert, so a second run leaves seven
-    datasets and six edges, not fourteen and twelve.
+    are derived from the ``bio://`` identifiers and the classification values
+    rather than assigned by the server, and every proposal is an upsert, so a
+    second run leaves seven datasets, four terms and six edges, not fourteen,
+    eight and twelve.
     """
     study_id = study_id_from(raw_dir)
     sizes = asset_sizes(study_id, raw_dir, results_dir)
+    governance = governance_metadata(results_dir, study_id)
     run_id = lineage_run_id(results_dir / LINEAGE_EVENTS)
 
     assets = prepare_assets(
         study_id,
         sizes=sizes,
         contracts=load_contracts(contract_dir or DEFAULT_CONTRACT_DIR),
+        governance=governance,
     )
     edges = lineage_edges(study_id)
 
     platform = client.emit_platform()
+    client.emit_glossary()
     for asset in assets:
         client.emit_dataset(asset)
     for target, sources in upstreams(study_id).items():
@@ -97,6 +108,7 @@ def publish_study_to_datahub(
         service=platform,
         assets=assets,
         edges=edges,
+        governance=governance,
         lineage_run_id=run_id,
     )
 

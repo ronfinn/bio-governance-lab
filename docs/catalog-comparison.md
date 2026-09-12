@@ -10,6 +10,11 @@ website.
 Everything here is a claim about *this* experiment. The last section says
 plainly what it does not establish, which matters more than the rest.
 
+Milestone 12 published each study's ownership and classification into both
+catalogues. Section 10 records how differently the two modelled it; the counts
+elsewhere in this document were re-measured after that change rather than left
+at their milestone-11 values.
+
 > **A note on "MCP".** DataHub abbreviates *Metadata Change Proposal* as MCP.
 > This repository has a Model Context Protocol server, also MCP. They are
 > unrelated; this document always writes Metadata Change Proposal in full.
@@ -25,7 +30,7 @@ The two integrations are given identical inputs, deliberately:
 | identities | the same seven `bio://` URIs |
 | lineage | the same **six** edges |
 | evidence read | the same files, checked by the same code |
-| pipeline | unchanged; neither catalogue is in `main.nf` |
+| pipeline | the same; neither catalogue is in `main.nf` |
 
 The sameness is the instrument. `datahub_publish.py` imports `prepare_assets`
 and `lineage_edges` from the OpenMetadata mapping, and imports
@@ -122,19 +127,21 @@ adopted as the project's identity, the other catalogue's constraints would have
 had to be satisfied by a translation layer, and a rename in one deployment would
 have been a rename of the asset itself.
 
-This is the cleanest result of the whole exercise, and section 11 returns to it.
+This is the cleanest result of the whole exercise, and section 12 returns to it.
 
 ## 4. Write and API model
 
 The two clients are not stylistic variants of each other. They are shaped by
 what each server accepts.
 
-**OpenMetadata — REST entities, `PUT` whole.** `client.py` speaks six requests
-over `httpx`, three of them writes. A write is a JSON body a person can read,
+**OpenMetadata — REST entities, `PUT` whole.** `client.py` speaks eight requests
+over `httpx`, five of them writes. A write is a JSON body a person can read,
 and `PUT` is create-or-update:
 
 ```
 PUT /v1/services/storageServices      → the service, returns its FQN
+PUT /v1/classifications               → the classification vocabulary, returns its FQN
+PUT /v1/tags                          → one classification value, returns its FQN
 PUT /v1/containers                    → one container, returns its entity UUID
 PUT /v1/lineage                       → one edge, addressed by two entity UUIDs
 GET /v1/system/version                → health, deliberately unauthenticated
@@ -146,15 +153,19 @@ GET /v1/lineage/container/name/{fqn}  → read the lineage graph around it
 entity. It is a *proposal*: an entity URN, an aspect, and a change type
 (`UPSERT`). The aspects are code-generated from Avro schemas, so
 `datahub_client.py` constructs `DatasetPropertiesClass`, `SubTypesClass`,
-`SchemaMetadataClass` and `UpstreamLineageClass` and hands each to the SDK's
-REST emitter.
+`SchemaMetadataClass`, `UpstreamLineageClass` and — since milestone 12 —
+`OwnershipClass`, `GlossaryTermsClass`, `GlossaryNodeInfoClass` and
+`GlossaryTermInfoClass`, and hands each to the SDK's REST emitter.
 
 The counts make the difference concrete. For one publication of BIO-001:
 
 | | OpenMetadata | DataHub |
 | --- | --- | --- |
-| writes per publication | **14** `PUT`s | **23** Metadata Change Proposals |
-| made of | 1 service + 7 containers + 6 edges | 1 platform + 7×(properties + subtype) + 4 schema + 4 lineage |
+| writes per publication | **19** `PUT`s | **42** Metadata Change Proposals |
+| made of | 1 service + 1 classification + 4 tags + 7 containers + 6 edges | 1 platform + 1 glossary node + 4 terms + 7×(properties + subtype + ownership + terms) + 4 schema + 4 lineage |
+
+(At milestone 11, before any governance metadata was published, the same
+publication was 14 `PUT`s and 23 proposals.)
 
 DataHub takes more writes for the same information because an aspect is the unit
 of a write. That is not overhead for its own sake — it is what makes partial
@@ -165,7 +176,7 @@ means "publish a dataset" is never one call.
 and are not; each was argued from what the API in front of it actually is:
 
 - `openmetadata-ingestion` resolves to **135 packages** — dbt-core, boto3,
-  grpcio, the Kubernetes client — to send four readable JSON bodies. The REST
+  grpcio, the Kubernetes client — to send five readable JSON bodies. The REST
   API *is* the readable interface, so the SDK buys nothing this project needs.
 - `acryl-datahub` resolves to **65 packages**, and what it wraps is not a JSON
   API but a generated Avro schema. Hand-rolling those bodies would mean
@@ -273,7 +284,7 @@ The trade-offs, stated as trade-offs:
 
 - **Avoiding `openmetadata-ingestion` cost almost nothing** because the REST API
   is documented, stable, and the same interface the SDK calls. The price paid is
-  untyped responses and hand-written request bodies — four of them, small enough
+  untyped responses and hand-written request bodies — five of them, small enough
   to read in one screen.
 - **Adopting `acryl-datahub` cost 65 packages** and an import the CLI must defer
   (about 80 ms on a process that starts in about 230 ms, which is why
@@ -286,7 +297,7 @@ The trade-offs, stated as trade-offs:
 
 Neither choice generalises into "SDKs are heavy" or "REST is simpler". The
 honest generalisation is narrower: **the cost of an SDK should be weighed
-against how much of the wire format you would otherwise have to own.** Four JSON
+against how much of the wire format you would otherwise have to own.** Five JSON
 bodies is a small thing to own. A generated Avro aspect model is not.
 
 ## 8. Local developer experience
@@ -325,7 +336,7 @@ bio-gov catalog datahub      health | publish <raw> <results> | get <study>
 
 That symmetry is a property of the two command groups, not of a shared
 abstraction underneath them — the modules behind them have almost nothing in
-common, which is the point of section 10's last row.
+common, which is the point of section 11's last row.
 
 **Test strategy** is where the API difference reappears:
 
@@ -333,7 +344,7 @@ common, which is the point of section 10's last row.
 | --- | --- | --- |
 | what is faked | HTTP, with `respx` | the SDK's **emitter**, with a recording double |
 | what is real in the test | the request bodies this project builds | the real `MetadataChangeProposalWrapper` and real aspect classes |
-| mocked tests | 23 | 27 |
+| mocked tests | 33 | 39 |
 | live tests | 2, skipped unless `OPENMETADATA_INTEGRATION_TEST=1` | 2, skipped unless `DATAHUB_INTEGRATION_TEST=1` |
 
 Because DataHub's boundary is an object rather than a socket, the double records
@@ -351,9 +362,10 @@ arrived.
 - The governance decision is computed by `bio-gov governance evaluate` from
   files on disk. It reads no catalogue, and `GovernanceReport.decision` is a
   computed field, so no catalogue can be the reason a study is READY.
-- The contracts, the quality report, the OpenLineage events and the governance
-  report are all produced by the pipeline and all survive both catalogues being
-  offline. `main.nf` is unchanged by milestones 7 and 10 alike.
+- The governance metadata result, the contracts, the quality report, the
+  OpenLineage events and the governance report are all produced by the pipeline
+  and all survive both catalogues being offline. `main.nf` is unchanged by
+  milestones 7 and 10 alike, and milestone 12 changed it only to add a gate.
 - Publication is an explicit post-run command in both cases. Nothing polls,
   reconciles or syncs, and a catalogue outage cannot fail a governed run.
 - The MCP server exposes evidence read from disk. Neither catalogue is exposed
@@ -368,28 +380,78 @@ quality, lineage, governance, MCP or pipeline layers. The diff for milestone 10
 touched `catalog/`, the CLI, tests, documentation and the dependency files —
 nothing else.
 
-That is the load-bearing evidence for section 11.
+That is the load-bearing evidence for section 12.
 
-## 10. Side-by-side decision matrix
+## 10. Governance metadata: one declaration, two projections
+
+Milestone 12 gave each study a committed, validated declaration of its owner,
+steward, contact and classification, and published it to both catalogues from
+the same evidence, through the same helper (`governance_metadata()` in
+`publish.py`, which refuses missing, failed or wrong-study evidence before the
+first request in either). The catalogues then took different amounts of it.
+
+| | OpenMetadata | DataHub |
+| --- | --- | --- |
+| classification vocabulary | a `Classification`, `mutuallyExclusive: true` | a glossary node |
+| the four values | four `Tag`s | four glossary terms |
+| on each asset | a tag label inside the container body | a `glossaryTerms` aspect |
+| owner and steward | **not sent** | an `ownership` aspect: `BUSINESS_OWNER`, `DATA_STEWARD` |
+| why | an owner is the UUID of a User or Group that must already exist | an owner is a URN the client derives; no account needed |
+| a changed classification | refused: `PUT` merges tags, then enforces exclusivity | replaced: the aspect is replaced whole |
+| a tag or owner added in the UI | survives a republish | overwritten by a republish |
+
+**Classification** fitted both, in each catalogue's own vocabulary. OpenMetadata
+literally calls a controlled, mutually exclusive tag set a *Classification*.
+DataHub reserves "controlled vocabulary for governance" for its glossary and
+calls tags informal. Neither was made to imitate the other: the same four
+values became tags in one and glossary terms in the other.
+
+**Ownership** did not fit both, and the reason is section 6 again. OpenMetadata's
+`EntityRepository.validateOwners` resolves each owner by a server-assigned UUID
+and requires a User, or a Team of type `Group`, that already exists; the only
+ways to satisfy it were to provision accounts or look up accounts a quickstart
+does not have, and both are out of scope. DataHub let the client name a
+principal it had never seen — verified on the local v1.7.0 quickstart, where the
+ownership aspect was stored and read back while `exists()` stayed false for both
+corpusers — exactly as it let lineage name an upstream before it existed.
+*Who owns the primary key* decided how lineage was addressed in milestone 10; in
+milestone 12 it decided whether ownership could be expressed at all.
+
+The write semantics also invert, and both are the catalogue's model rather than
+this project's choice. OpenMetadata *merges* tags on `PUT` (so manual tags
+survive and a reclassification is refused, loudly), where DataHub *replaces*
+aspects (so a reclassification simply lands, and a manually added owner is
+silently overwritten). A shared "set classification" abstraction would have had
+to pick one of those and lie about the other.
+
+The OpenMetadata behaviours in this section were read from its 1.13.4 source;
+the local OpenMetadata was not running during milestone 12, so its live test —
+which now asserts the tag and the absence of owners — has not been run against
+them. The DataHub behaviours were observed. See
+[governance-metadata.md](governance-metadata.md) for the full account.
+
+## 11. Side-by-side decision matrix
 
 | Dimension | OpenMetadata implementation | DataHub implementation |
 | --- | --- | --- |
 | Asset representation | `Container` under one `CustomStorage` `StorageService` | `Dataset` under one custom `DataPlatform`, env `PROD` |
 | Canonical identifier mapping | `bio://` → entity name `BIO-001_raw_samples`, FQN `bio_governance_lab.BIO-001_raw_samples`; URI carried in `fullPath` | `bio://` → dataset name `BIO-001.raw.samples`, URN `urn:li:dataset:(…,PROD)`; URI carried in `qualifiedName` + `canonical_asset_id` |
-| Publication mechanism | 14 REST `PUT`s over `httpx` | 23 Metadata Change Proposals (`UPSERT` aspects) over the SDK's REST emitter |
+| Publication mechanism | 19 REST `PUT`s over `httpx` | 42 Metadata Change Proposals (`UPSERT` aspects) over the SDK's REST emitter |
+| Classification | a tag of a mutually exclusive `Classification` | a glossary term under a glossary node |
+| Ownership | not projected — owners must be existing users or Group teams | `ownership` aspect, owner and data steward, derived corpuser URNs |
 | SDK requirement | none — REST called directly | required in practice; the aspect model is generated from Avro |
 | Lineage representation | one `PUT /v1/lineage` per edge, addressed by server-assigned entity UUIDs; 6 edges = 6 requests | one `upstreamLineage` aspect per *downstream* dataset, addressed by URNs; 6 edges = 4 aspects |
 | Idempotence mechanism | `PUT` is create-or-update on a deterministic FQN | `UPSERT` replaces the aspect at a client-derived URN |
 | Local setup | release compose file, 4 containers, ~4 GB, JWT required for writes | `datahub docker quickstart`, 7 containers, hard 4.3 GB floor, no token needed |
 | Dependency footprint | `httpx` (7 packages) | `acryl-datahub` (65 packages), lazily imported (~80 ms) |
-| Implementation complexity | client 207 lines, mapping 169, publish 160; simple requests, untyped responses, server-assigned IDs to track | client 267 lines, mapping 125, publish 90 (helpers reused); more writes, typed reads, grouping required before send |
+| Implementation complexity | client 252 non-blank lines, mapping 214, publish 228; simple requests, untyped responses, server-assigned IDs to track | client 359 non-blank lines, mapping 175, publish 102 (helpers reused); more writes, typed reads, grouping required before send |
 | Strength demonstrated by this lab | an honest home for files (`CustomStorage`), a readable wire format, and a near-zero dependency cost | client-derived URNs (no ID bookkeeping, order-independent writes) and typed aspects on both write and read |
 | Limitation demonstrated by this lab | server-assigned entity UUIDs force ordering and an ID map; untyped JSON on reads pushes defensive parsing into the caller; a token is mandatory even locally | an aspect replaces rather than merges, so grouped lineage is mandatory and getting it wrong fails **silently**; heavier to run and to depend on |
 
 No scores, no ranking, and no benchmark — nothing here was timed under load or
 measured for search quality.
 
-## 11. What this exercise taught
+## 12. What this exercise taught
 
 **A governance layer should keep its own canonical identity and its own
 evidence, and treat every catalogue as a projection.**
@@ -443,7 +505,7 @@ identity and a typed metadata model, and can afford the machine and the
 dependency. That is a much smaller claim than "X is better than Y", and it is
 the largest one this experiment supports.
 
-## 12. What this comparison does **not** prove
+## 13. What this comparison does **not** prove
 
 This is one developer, one laptop, one synthetic study of seven small files and
 six edges, published a handful of times into two local quickstart deployments.
@@ -456,9 +518,11 @@ It establishes nothing whatsoever about:
 - **Production reliability** — no failover, restart, upgrade, backup, restore or
   data-migration testing. Both stacks were run in quickstart mode, which both
   projects say is for demonstration.
-- **Organizational adoption** — no stewards, no teams, no domains, no glossary,
-  no ownership workflows. This project deliberately publishes none of those,
-  because inventing them on one side would have distorted the comparison.
+- **Organizational adoption** — no teams, no domains, no business glossary, no
+  ownership or stewardship workflows. Milestone 12 publishes one synthetic owner,
+  one synthetic steward and one classification per study; that shows how each
+  model *holds* a declaration, and nothing about how either supports stewardship
+  across an organisation.
 - **Managed-cloud capabilities** — DataHub Cloud and Collate were not used or
   assessed. Only the open-source cores were compared.
 - **Large-scale ingestion performance** — neither project's connector framework

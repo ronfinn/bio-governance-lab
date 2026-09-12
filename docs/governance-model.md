@@ -61,6 +61,11 @@ Sensitivity of the contents, and the basis for access decisions. In this project
 every asset is synthetic, but the classification is modelled honestly so the
 controls being demonstrated are the real ones.
 
+Since milestone 12 a study's classification is *declared*, in
+`governance/studies/<STUDY>.yaml`, and the governance evaluation checks that the
+declaration exists, names the study and uses one of these four values. It does
+not decide what any value permits. See [governance-metadata.md](governance-metadata.md).
+
 ## Ownership
 
 Two distinct roles, because conflating them is how assets end up unowned:
@@ -70,6 +75,11 @@ Two distinct roles, because conflating them is how assets end up unowned:
 - **steward** — responsible for its day-to-day quality and correctness. Usually
   a person.
 - **contact** — a route to reach them.
+
+The same declaration names a study's owner, steward and contact, validated into
+this `Ownership` model — which is closed, so a field it does not define is
+refused rather than ignored. The declaration names people only; there are no
+teams, roles or directory identifiers.
 
 ## Provenance
 

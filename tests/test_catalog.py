@@ -22,6 +22,7 @@ import respx
 from typer.testing import CliRunner
 
 from bio_governance.catalog import (
+    CLASSIFICATION_NAME,
     DEFAULT_HOST,
     HOST_VAR,
     SERVICE_NAME,
@@ -31,6 +32,7 @@ from bio_governance.catalog import (
     FileFormat,
     OpenMetadataClient,
     OpenMetadataConfig,
+    classification_tag_fqn,
     entity_name,
     fully_qualified_name,
     lineage_edges,
@@ -38,7 +40,8 @@ from bio_governance.catalog import (
     publish_study,
 )
 from bio_governance.cli import app
-from bio_governance.models import AssetIdentifier
+from bio_governance.models import AssetIdentifier, Classification
+from conftest import GOVERNANCE_DIR, REFUSALS, damage_governance_evidence, validate_declaration
 
 runner = CliRunner()
 
@@ -208,16 +211,19 @@ def test_only_the_explainable_lineage_edges_are_published() -> None:
 class FakeOpenMetadata:
     """A stand-in server that records every request and never forgets an entity.
 
-    Entities are keyed the way OpenMetadata keys them — services by name,
-    containers by fully qualified name, edges by their endpoints — so a second
-    publication that creates duplicates would show up here as a second entry
-    rather than as an overwrite.
+    Entities are keyed the way OpenMetadata keys them — services and
+    classifications by name, tags and containers by fully qualified name, edges
+    by their endpoints — so a second publication that creates duplicates would
+    show up here as a second entry rather than as an overwrite. Like the real
+    server, it refuses a container carrying a tag that does not exist yet.
     """
 
     def __init__(self) -> None:
         self.requests: list[tuple[str, str]] = []
         self.containers: dict[str, dict[str, Any]] = {}
         self.services: dict[str, dict[str, Any]] = {}
+        self.classifications: dict[str, dict[str, Any]] = {}
+        self.tags: dict[str, dict[str, Any]] = {}
         self.edges: list[tuple[str, str]] = []
 
     def install(self, router: respx.Router) -> None:
@@ -225,6 +231,8 @@ class FakeOpenMetadata:
             side_effect=lambda request: self._record(request, {"version": "1.13.4"})
         )
         router.put(f"{DEFAULT_HOST}/v1/services/storageServices").mock(side_effect=self._service)
+        router.put(f"{DEFAULT_HOST}/v1/classifications").mock(side_effect=self._classification)
+        router.put(f"{DEFAULT_HOST}/v1/tags").mock(side_effect=self._tag)
         router.put(f"{DEFAULT_HOST}/v1/containers").mock(side_effect=self._container)
         router.put(f"{DEFAULT_HOST}/v1/lineage").mock(side_effect=self._lineage)
 
@@ -249,8 +257,25 @@ class FakeOpenMetadata:
         self.services[body["name"]] = body
         return self._record(request, body)
 
+    def _classification(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        body["fullyQualifiedName"] = body["name"]
+        self.classifications[body["name"]] = body
+        return self._record(request, body)
+
+    def _tag(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        fqn = f"{body['classification']}.{body['name']}"
+        body["fullyQualifiedName"] = fqn
+        self.tags[fqn] = body
+        return self._record(request, body)
+
     def _container(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
+        unknown = [tag["tagFQN"] for tag in body.get("tags", []) if tag["tagFQN"] not in self.tags]
+        if unknown:
+            self.requests.append((request.method, request.url.path))
+            return httpx.Response(404, json={"message": f"tag instance for {unknown[0]} not found"})
         fqn = f"{body['service']}.{body['name']}"
         body["fullyQualifiedName"] = fqn
         body["id"] = self.containers.get(fqn, {}).get("id") or f"id-{body['name']}"
@@ -323,7 +348,139 @@ def test_publishing_twice_is_idempotent(
     assert {method for method, _ in catalog.requests} <= {"GET", "PUT"}
     assert catalog.requests[len(first) :] == first
     assert len(catalog.containers) == 7
+    assert len(catalog.classifications) == 1
+    assert len(catalog.tags) == 4
     assert catalog.published_edges == EXPECTED_EDGES
+    # 1 service + 1 classification + 4 tags + 7 containers + 6 edges.
+    assert len(first) == 19
+
+
+# --------------------------------------------------------------------------
+# Governance metadata: classification projected, ownership deliberately not
+# --------------------------------------------------------------------------
+
+
+def publish(
+    catalog: FakeOpenMetadata, raw: Path, results: Path, *, times: int = 1
+) -> list[tuple[str, str]]:
+    """Publish ``times`` times against the fake, and return each run's requests."""
+    with respx.mock as router:
+        catalog.install(router)
+        with OpenMetadataClient(OpenMetadataConfig.from_env()) as client:
+            runs = []
+            for _ in range(times):
+                start = len(catalog.requests)
+                publish_study(client, raw, results)
+                runs.append(catalog.requests[start:])
+    return [request for run in runs for request in run]
+
+
+def test_the_classification_vocabulary_is_one_mutually_exclusive_classification(
+    study_files: tuple[Path, Path], catalog: FakeOpenMetadata
+) -> None:
+    raw, results = study_files
+
+    publish(catalog, raw, results)
+
+    assert catalog.classifications[CLASSIFICATION_NAME]["mutuallyExclusive"] is True
+    # The whole vocabulary, named by its own values, not only the one in use.
+    assert set(catalog.tags) == {f"{CLASSIFICATION_NAME}.{value}" for value in Classification}
+
+
+def test_every_container_carries_the_declared_classification_as_a_tag(
+    study_files: tuple[Path, Path], catalog: FakeOpenMetadata
+) -> None:
+    raw, results = study_files
+
+    publish(catalog, raw, results)
+
+    expected = classification_tag_fqn(Classification.INTERNAL)
+    assert expected == "bio_governance_classification.internal"
+    for body in catalog.containers.values():
+        assert body["tags"] == [
+            {
+                "tagFQN": expected,
+                "source": "Classification",
+                "labelType": "Manual",
+                "state": "Confirmed",
+            }
+        ]
+
+
+def test_the_declared_value_is_what_is_projected(
+    study_files: tuple[Path, Path], catalog: FakeOpenMetadata, tmp_path: Path
+) -> None:
+    """The tag follows the declaration, not a default."""
+    raw, results = study_files
+    declaration = tmp_path / "BIO-001.yaml"
+    declaration.write_text(
+        (GOVERNANCE_DIR / "BIO-001.yaml")
+        .read_text(encoding="utf-8")
+        .replace("internal", "confidential"),
+        encoding="utf-8",
+    )
+    validate_declaration(raw, results, declaration)
+
+    publish(catalog, raw, results)
+
+    tags = {tag["tagFQN"] for body in catalog.containers.values() for tag in body["tags"]}
+    assert tags == {"bio_governance_classification.confidential"}
+
+
+def test_ownership_is_not_sent_to_openmetadata(
+    study_files: tuple[Path, Path], catalog: FakeOpenMetadata
+) -> None:
+    """OpenMetadata owners are server UUIDs of existing users or teams.
+
+    The declaration names people, and this project provisions no accounts, so
+    no request carries an owner — and no description is quietly rewritten to
+    carry one instead.
+    """
+    raw, results = study_files
+
+    published = publish(catalog, raw, results)
+
+    assert published
+    for body in [*catalog.containers.values(), *catalog.services.values()]:
+        assert "owners" not in body
+        assert "Avery Example" not in json.dumps(body)
+
+
+def test_tags_exist_before_any_container_that_carries_one(
+    study_files: tuple[Path, Path], catalog: FakeOpenMetadata
+) -> None:
+    raw, results = study_files
+
+    requests = publish(catalog, raw, results)
+
+    paths = [path for _, path in requests]
+    last_tag = max(index for index, path in enumerate(paths) if path == "/api/v1/tags")
+    first_container = paths.index("/api/v1/containers")
+    assert last_tag < first_container
+
+
+@pytest.mark.parametrize(("damage", "message"), REFUSALS, ids=[d for d, _ in REFUSALS])
+def test_publication_refuses_governance_metadata_it_cannot_rely_on(
+    study_files: tuple[Path, Path],
+    catalog: FakeOpenMetadata,
+    tmp_path: Path,
+    damage: str,
+    message: str,
+) -> None:
+    """Only a validated declaration for this study is projected — checked before any request."""
+    raw, results = study_files
+    damage_governance_evidence(raw, results, tmp_path, damage)
+
+    with respx.mock as router:
+        catalog.install(router)
+        with (
+            OpenMetadataClient(OpenMetadataConfig.from_env()) as client,
+            pytest.raises(CatalogError) as error,
+        ):
+            publish_study(client, raw, results)
+
+    assert message in str(error.value)
+    assert catalog.requests == []
 
 
 def test_a_missing_curated_file_stops_publication_before_any_request(
@@ -450,6 +607,8 @@ def test_cli_publish_prints_seven_assets_and_six_edges(
     assert "6 lineage edges" in result.output
     assert "BIO-001_quality_dq-report" in result.output
     assert "bio://BIO-001/raw/samples" in result.output
+    assert "Classification: internal -> tag bio_governance_classification.internal" in result.output
+    assert "Ownership: not published" in result.output
 
 
 def test_cli_get_reads_the_published_assets_back(
@@ -493,3 +652,4 @@ def test_cli_get_reads_the_published_assets_back(
     assert "bio://BIO-001/raw/samples" in result.output
     assert f"{SERVICE_NAME}.BIO-001_curated_samples" in result.output
     assert f"{SERVICE_NAME}.BIO-001_quality_dq-report" in result.output
+    assert "bio_governance_classification.internal" in result.output

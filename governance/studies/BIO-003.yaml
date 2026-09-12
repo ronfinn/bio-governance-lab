@@ -1,0 +1,16 @@
+# Governance metadata for study BIO-003.
+#
+# Who answers for the study, and how sensitive it is. Validated by:
+#   uv run bio-gov governance metadata validate governance/studies/BIO-003.yaml \
+#     --study-dir data/raw/BIO-003
+#
+# Everything here is synthetic. The people are invented, and example.org is a
+# domain reserved for documentation: the address cannot reach anybody. This is
+# not a data contract — it says nothing about any file's structure.
+
+study_id: BIO-003
+classification: internal
+ownership:
+  owner: Avery Example
+  steward: Jordan Example
+  contact: bio-003-governance@example.org

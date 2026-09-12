@@ -85,7 +85,7 @@ Six, all read-only, all confined to the results root.
 | Tool | Input | Returns |
 | --- | --- | --- |
 | `list_studies` | — | Every governed study under the results root, with its decision |
-| `get_governance_report` | `study_id` | The `GovernanceReport`: the decision and its five checks |
+| `get_governance_report` | `study_id` | The `GovernanceReport`: the decision and its seven checks |
 | `get_quality_report` | `study_id` | The `QualityReport`: six checks and an overall status |
 | `get_contract_results` | `study_id` | Both `ContractValidationResult`s, samples and compounds |
 | `get_lineage_summary` | `study_id` | The curation run's identity and its `bio://` datasets |

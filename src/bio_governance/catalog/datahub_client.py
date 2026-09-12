@@ -2,8 +2,8 @@
 
 The OpenMetadata client in this package deliberately does *not* use that
 project's SDK: ``openmetadata-ingestion`` resolves to around 130 transitive
-packages for five kinds of request, and the REST API it wraps is documented and
-stable. The decision goes the other way here, and for reasons worth writing
+packages for eight kinds of request, and the REST API it wraps is documented
+and stable. The decision goes the other way here, and for reasons worth writing
 down rather than for consistency's sake:
 
 * ``acryl-datahub`` resolves to 65 packages, none of them a dbt or a
@@ -43,14 +43,22 @@ from contextlib import suppress
 from types import TracebackType
 from typing import Any, TypeVar
 
+from datahub.emitter.mce_builder import make_user_urn
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.emitter.rest_emitter import DatahubRestEmitter
 from datahub.ingestion.graph.client import DatahubClientConfig, DataHubGraph
 from datahub.metadata.schema_classes import (
+    AuditStampClass,
     DataPlatformInfoClass,
     DatasetLineageTypeClass,
     DatasetPropertiesClass,
+    GlossaryNodeInfoClass,
+    GlossaryTermAssociationClass,
+    GlossaryTermInfoClass,
+    GlossaryTermsClass,
     OtherSchemaClass,
+    OwnerClass,
+    OwnershipClass,
     PlatformTypeClass,
     SchemaFieldClass,
     SchemaFieldDataTypeClass,
@@ -62,23 +70,44 @@ from datahub.metadata.schema_classes import (
 )
 
 from bio_governance.catalog.datahub_mapping import (
+    GLOSSARY_NODE_DEFINITION,
+    GLOSSARY_NODE_DISPLAY_NAME,
+    GLOSSARY_NODE_URN,
     NAME_DELIMITER,
     PLATFORM_DISPLAY_NAME,
     PLATFORM_NAME,
     PLATFORM_URN,
+    TERM_SOURCE,
+    TERMS_ACTOR,
+    TERMS_TIME,
     custom_properties,
     dataset_name,
     dataset_urn,
+    owners,
     subtype,
+    term_definition,
+    term_urn,
 )
 from bio_governance.catalog.models import CatalogAsset, CatalogError, DataHubConfig
-from bio_governance.models import AssetIdentifier
+from bio_governance.models import AssetIdentifier, Classification, Ownership
 
 #: How long any single call may take. A local server that has not answered in
 #: half a minute is not a slow server, it is a stopped one.
 DEFAULT_TIMEOUT = 30.0
 
 T = TypeVar("T")
+
+
+def owner_urns(ownership: Ownership) -> tuple[tuple[str, str], ...]:
+    """Each declared person's corpuser URN and DataHub ownership type.
+
+    The URN is built by the SDK's own ``make_user_urn``, which is also what
+    DataHub's SDK does with an owner given as a bare name. The declaration does
+    not say whether a name is a person or a team — saying so would be the team
+    structure this project deliberately does not model — so the name is
+    projected the way DataHub itself projects one, as a user.
+    """
+    return tuple((make_user_urn(name), kind) for name, kind in owners(ownership))
 
 
 class DataHubClient:
@@ -168,14 +197,47 @@ class DataHubClient:
         self._emit(MetadataChangeProposalWrapper(entityUrn=PLATFORM_URN, aspect=info), PLATFORM_URN)
         return PLATFORM_URN
 
+    def emit_glossary(self) -> str:
+        """Define the classification vocabulary as a glossary node and its four terms.
+
+        DataHub would accept a dataset naming a glossary term that was never
+        defined, and show it as a bare URN; a term with no ``glossaryTermInfo``
+        is the glossary equivalent of a platform with no ``dataPlatformInfo``.
+        So the whole vocabulary is defined, not only the value in use.
+        """
+        node = GlossaryNodeInfoClass(
+            definition=GLOSSARY_NODE_DEFINITION, name=GLOSSARY_NODE_DISPLAY_NAME
+        )
+        self._emit(
+            MetadataChangeProposalWrapper(entityUrn=GLOSSARY_NODE_URN, aspect=node),
+            GLOSSARY_NODE_URN,
+        )
+        for value in Classification:
+            urn = term_urn(value)
+            info = GlossaryTermInfoClass(
+                definition=term_definition(value),
+                termSource=TERM_SOURCE,
+                name=value.value,
+                parentNode=GLOSSARY_NODE_URN,
+            )
+            self._emit(MetadataChangeProposalWrapper(entityUrn=urn, aspect=info), urn)
+        return GLOSSARY_NODE_URN
+
     def emit_dataset(self, asset: CatalogAsset) -> str:
         """Publish one governed asset as a DataHub dataset, and return its URN.
 
-        Three aspects, each a separate Metadata Change Proposal against the same
-        URN: what the dataset is and the canonical identity it carries, which
-        lifecycle stage it belongs to, and — where a contract declares one — its
-        schema. Sending them separately is DataHub's model rather than a choice;
-        an aspect is the unit a write replaces.
+        Up to five aspects, each a separate Metadata Change Proposal against
+        the same URN: what the dataset is and the canonical identity it carries,
+        which lifecycle stage it belongs to, who owns it, how it is classified,
+        and — where a contract declares one — its schema. Sending them
+        separately is DataHub's model rather than a choice; an aspect is the
+        unit a write replaces.
+
+        That replacement is also what the governance aspects rely on. An
+        ``UPSERT`` of ``ownership`` or ``glossaryTerms`` replaces the whole
+        list, so a changed declaration replaces what DataHub held — including
+        an owner somebody added by hand in the UI. The declaration is canonical
+        and the catalogue is its projection, and this is what that means here.
         """
         identifier = AssetIdentifier.parse(asset.identifier)
         urn = dataset_urn(identifier)
@@ -187,6 +249,22 @@ class DataHubClient:
             customProperties=custom_properties(asset),
         )
         aspects: list[Any] = [properties, SubTypesClass(typeNames=[subtype(asset)])]
+        if asset.ownership is not None:
+            aspects.append(
+                OwnershipClass(
+                    owners=[
+                        OwnerClass(owner=owner, type=kind)
+                        for owner, kind in owner_urns(asset.ownership)
+                    ]
+                )
+            )
+        if asset.classification is not None:
+            aspects.append(
+                GlossaryTermsClass(
+                    terms=[GlossaryTermAssociationClass(urn=term_urn(asset.classification))],
+                    auditStamp=AuditStampClass(time=TERMS_TIME, actor=TERMS_ACTOR),
+                )
+            )
         if asset.columns:
             aspects.append(
                 SchemaMetadataClass(
@@ -257,6 +335,26 @@ class DataHubClient:
         if aspect is None:
             return ()
         return tuple(upstream.dataset for upstream in aspect.upstreams)
+
+    def get_owners(self, urn: str) -> tuple[tuple[str, str], ...]:
+        """The owner URNs and ownership types DataHub holds for one dataset."""
+        aspect = self._call(
+            f"read the ownership of {urn}",
+            lambda: self._client().get_aspect(urn, OwnershipClass),
+        )
+        if aspect is None:
+            return ()
+        return tuple((owner.owner, str(owner.type)) for owner in aspect.owners)
+
+    def get_glossary_terms(self, urn: str) -> tuple[str, ...]:
+        """The glossary term URNs DataHub holds for one dataset."""
+        aspect = self._call(
+            f"read the glossary terms of {urn}",
+            lambda: self._client().get_aspect(urn, GlossaryTermsClass),
+        )
+        if aspect is None:
+            return ()
+        return tuple(term.urn for term in aspect.terms)
 
     def _emit(self, proposal: MetadataChangeProposalWrapper, urn: str) -> None:
         self._call(f"write to {urn}", lambda: self._rest_emitter().emit(proposal))

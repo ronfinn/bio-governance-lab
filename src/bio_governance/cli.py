@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -20,11 +20,13 @@ from bio_governance.catalog import (
     OpenMetadataClient,
     OpenMetadataConfig,
     PublishedCatalog,
+    classification_tag_fqn,
     dataset_name,
     dataset_urn,
     fully_qualified_name,
     publish_study,
     study_identifiers,
+    term_urn,
 )
 from bio_governance.contracts import (
     ContractError,
@@ -37,7 +39,10 @@ from bio_governance.governance import (
     GovernanceCheckStatus,
     GovernanceError,
     GovernanceReport,
+    MetadataError,
+    MetadataValidationResult,
     evaluate_governance,
+    validate_metadata,
 )
 from bio_governance.lineage import (
     LineageError,
@@ -108,6 +113,13 @@ governance_app = typer.Typer(
 )
 app.add_typer(governance_app, name="governance")
 
+metadata_app = typer.Typer(
+    name="metadata",
+    help="Validate a study's ownership and classification declaration.",
+    no_args_is_help=True,
+)
+governance_app.add_typer(metadata_app, name="metadata")
+
 catalog_app = typer.Typer(
     name="catalog",
     help="Publish governed assets to a metadata catalogue.",
@@ -167,6 +179,7 @@ def info() -> None:
     typer.echo("YAML data contracts over the generated CSVs: 'bio-gov contract validate'.")
     typer.echo("Study-level data-quality evidence: 'bio-gov dq run'.")
     typer.echo("OpenLineage provenance events for a curation run: 'bio-gov lineage emit'.")
+    typer.echo("Ownership and classification evidence: 'bio-gov governance metadata validate'.")
     typer.echo("Deterministic governance decisions: 'bio-gov governance evaluate'.")
     typer.echo("Publication to a local OpenMetadata: 'bio-gov catalog openmetadata publish'.")
     typer.echo("The same assets in DataHub: 'bio-gov catalog datahub publish'.")
@@ -536,6 +549,86 @@ def _format_governance(report: GovernanceReport) -> list[str]:
     return lines
 
 
+@metadata_app.command("validate")
+def governance_metadata_validate(
+    declaration: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            help="Governance declaration, e.g. governance/studies/BIO-001.yaml.",
+        ),
+    ],
+    study_dir: Annotated[
+        Path,
+        typer.Option(
+            "--study-dir",
+            exists=True,
+            file_okay=False,
+            help="The study the declaration must describe, e.g. data/raw/BIO-001.",
+        ),
+    ],
+    json_out: Annotated[
+        Path | None,
+        typer.Option("--json-out", help="Also write the structured result to this path."),
+    ] = None,
+) -> None:
+    """Check a study's governance declaration: its owner, steward and classification.
+
+    The declaration must name the study in --study-dir, name an owner and a
+    steward, give a contact, and use the project's classification vocabulary —
+    nothing more and nothing else. Every problem is reported, not just the first.
+
+    Exits 0 when the declaration is valid, 1 when it is not, and 2 when the
+    declaration or the study directory could not be read at all. --json-out
+    writes the MetadataValidationResult, pass or fail; it is the evidence
+    'bio-gov governance evaluate' reads for its ownership and classification
+    checks.
+    """
+    try:
+        result = validate_metadata(declaration, study_dir)
+    except MetadataError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(ERROR_EXIT_CODE) from exc
+
+    if json_out is not None:
+        _write_json(result, json_out)
+
+    for line in _format_metadata(result):
+        typer.echo(line)
+    if json_out is not None:
+        typer.echo(f"\nResult: {json_out}")
+    if not result.passed:
+        raise typer.Exit(FAIL_EXIT_CODE)
+
+
+def _format_metadata(result: MetadataValidationResult) -> list[str]:
+    """Render a declaration's validation as the lines of the CLI report."""
+    lines = [
+        f"Governance metadata: {result.declaration}",
+        f"Study: {result.study_id}",
+        "",
+        "PASS" if result.passed else "FAIL",
+    ]
+    metadata = result.metadata
+    if metadata is not None:
+        return [
+            *lines,
+            f"Owner: {metadata.ownership.owner}",
+            f"Steward: {metadata.ownership.steward}",
+            f"Contact: {metadata.ownership.contact}",
+            f"Classification: {metadata.classification.value}",
+        ]
+
+    count = len(result.problems)
+    lines += ["", f"{count} problem{'' if count == 1 else 's'}", ""]
+    width = max(len(problem.field.value) for problem in result.problems)
+    lines += [
+        f"{problem.field.value.ljust(width)}  {problem.message}" for problem in result.problems
+    ]
+    return lines
+
+
 @openmetadata_app.command("health")
 def catalog_health() -> None:
     """Report whether the configured OpenMetadata instance is reachable.
@@ -582,12 +675,16 @@ def catalog_publish(
         typer.Option("--contracts", help="Directory the shipped contracts are read from."),
     ] = DEFAULT_CONTRACT_DIR,
 ) -> None:
-    """Publish a study's governed assets and their lineage to OpenMetadata.
+    """Publish a study's governed assets, classification and lineage to OpenMetadata.
 
-    Upserts one CustomStorage service, the study's seven containers, and the
-    six lineage edges this project can explain. Running it twice updates the
+    Upserts one CustomStorage service, the bio_governance_classification and
+    its four tags, the study's seven containers — each tagged with the
+    classification its validated governance declaration states — and the six
+    lineage edges this project can explain. Ownership is not sent: OpenMetadata
+    owners must be users or teams it already holds. Running it twice updates the
     same entities rather than creating a second set. Exits 0 on success and 2
-    when the catalogue could not be reached or a claimed file is missing.
+    when the catalogue could not be reached, a claimed file is missing, or the
+    governance declaration is missing or did not validate.
     """
     config = OpenMetadataConfig.from_env()
     try:
@@ -599,7 +696,16 @@ def catalog_publish(
         raise typer.Exit(ERROR_EXIT_CODE) from exc
 
     typer.echo(f"OpenMetadata: {version} at {config.host}")
-    for line in _format_catalog(published):
+    governance = published.governance
+    for line in _format_catalog(
+        published,
+        governance_lines=[
+            f"Classification: {governance.classification.value} "
+            f"-> tag {classification_tag_fqn(governance.classification)}",
+            "Ownership: not published (OpenMetadata owners must be existing users or teams; "
+            f"declared owner {governance.ownership.owner}, steward {governance.ownership.steward})",
+        ],
+    ):
         typer.echo(line)
 
 
@@ -639,7 +745,8 @@ def catalog_get(
     width = max(len(str(container.get("fullyQualifiedName", ""))) for _, container in containers)
     for identifier, container in containers:
         fqn = str(container.get("fullyQualifiedName", ""))
-        typer.echo(f"  {fqn.ljust(width)}  {container.get('fullPath', '(no fullPath)')}")
+        tags = ", ".join(_tag_names(container)) or "(no tags)"
+        typer.echo(f"  {fqn.ljust(width)}  {container.get('fullPath', '(no fullPath)')}  {tags}")
         if container.get("fullPath") != identifier.uri:
             typer.echo(f"    warning: fullPath is not {identifier.uri}")
 
@@ -695,15 +802,18 @@ def datahub_publish(
         typer.Option("--contracts", help="Directory the shipped contracts are read from."),
     ] = DEFAULT_CONTRACT_DIR,
 ) -> None:
-    """Publish a study's governed assets and their lineage to DataHub.
+    """Publish a study's governed assets, governance and lineage to DataHub.
 
-    Upserts one data platform, the study's seven datasets and the six lineage
+    Upserts one data platform, a glossary of the four classification terms, the
+    study's seven datasets — each with the owner, data steward and glossary
+    term its validated governance declaration states — and the six lineage
     edges this project can explain, as Metadata Change Proposals against URNs
     derived from the bio:// identifiers. Running it twice updates the same
     entities rather than creating a second set. Exits 0 on success and 2 when
-    the catalogue could not be reached or a claimed file is missing.
+    the catalogue could not be reached, a claimed file is missing, or the
+    governance declaration is missing or did not validate.
     """
-    from bio_governance.catalog.datahub_client import DataHubClient
+    from bio_governance.catalog.datahub_client import DataHubClient, owner_urns
     from bio_governance.catalog.datahub_publish import publish_study_to_datahub
 
     config = DataHubConfig.from_env()
@@ -716,7 +826,18 @@ def datahub_publish(
         raise typer.Exit(ERROR_EXIT_CODE) from exc
 
     typer.echo(f"DataHub: {version} at {config.gms_url}")
-    for line in _format_catalog(published, service_label="Platform", name_of=_datahub_name):
+    governance = published.governance
+    owners = ", ".join(f"{urn} ({kind})" for urn, kind in owner_urns(governance.ownership))
+    for line in _format_catalog(
+        published,
+        service_label="Platform",
+        name_of=_datahub_name,
+        governance_lines=[
+            f"Classification: {governance.classification.value} "
+            f"-> {term_urn(governance.classification)}",
+            f"Owners: {owners}",
+        ],
+    ):
         typer.echo(line)
 
 
@@ -731,7 +852,8 @@ def datahub_get(
 
     This is the verification half of publication: it asks the catalogue what it
     holds rather than trusting what was sent. Each dataset is fetched by its URN
-    and reported with the bio:// identifier it carries, and every upstream
+    and reported with the bio:// identifier, glossary terms and owners it
+    carries, and every upstream
     DataHub holds is fetched too, so the six edges can be confirmed through the
     SDK rather than by looking at the UI. Exits 0 when every expected asset came
     back and 2 when one did not.
@@ -751,6 +873,14 @@ def datahub_get(
                 (dataset_urn(identifier), client.get_upstreams(dataset_urn(identifier)))
                 for identifier in identifiers
             ]
+            governance = {
+                dataset_urn(identifier): (
+                    client.get_glossary_terms(dataset_urn(identifier)),
+                    client.get_owners(dataset_urn(identifier)),
+                )
+                for identifier, properties in datasets
+                if properties is not None
+            }
     except CatalogError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(ERROR_EXIT_CODE) from exc
@@ -770,6 +900,11 @@ def datahub_get(
         typer.echo(f"  {urn.ljust(width)}  {canonical}")
         if canonical != identifier.uri:
             typer.echo(f"    warning: {CANONICAL_PROPERTY} is not {identifier.uri}")
+        terms, owned_by = governance[urn]
+        typer.echo(f"    terms:  {', '.join(terms) or '(none)'}")
+        typer.echo(
+            f"    owners: {', '.join(f'{owner} ({kind})' for owner, kind in owned_by) or '(none)'}"
+        )
 
     found = [(urn, upstream) for urn, upstreams in edges for upstream in upstreams]
     typer.echo(f"\n{len(found)} lineage edges")
@@ -795,17 +930,20 @@ def _format_catalog(
     *,
     service_label: str = "Service",
     name_of: Callable[[CatalogAsset], str] = lambda asset: asset.name,
+    governance_lines: Sequence[str] = (),
 ) -> list[str]:
     """Render a publication as the lines of the CLI summary.
 
     Shared by both catalogues, because a publication means the same thing in
-    each. Two things differ, and both are arguments: the word for the thing the
+    each. Three things differ, and all are arguments: the word for the thing the
     assets belong to — a storage service in OpenMetadata, a data platform in
-    DataHub — and how each catalogue names an asset.
+    DataHub — how each catalogue names an asset, and what each could hold of
+    the study's governance declaration.
     """
     lines = [
         f"{service_label}: {published.service}",
         f"Study: {published.study_id}",
+        *governance_lines,
         "",
         f"{len(published.assets)} assets",
     ]
@@ -820,6 +958,15 @@ def _format_catalog(
     if published.lineage_run_id is not None:
         lines += ["", f"OpenLineage run: {published.lineage_run_id}"]
     return lines
+
+
+def _tag_names(container: dict[str, Any]) -> list[str]:
+    """The tag FQNs an OpenMetadata container holds, from its untyped JSON."""
+    return [
+        str(tag.get("tagFQN"))
+        for tag in container.get("tags") or []
+        if isinstance(tag, dict) and tag.get("tagFQN")
+    ]
 
 
 def _downstream_names(graph: dict[str, Any]) -> list[str]:

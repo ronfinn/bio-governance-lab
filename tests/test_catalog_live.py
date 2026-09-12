@@ -7,7 +7,8 @@ and never starts one. Run it against a local Docker deployment with::
     OPENMETADATA_INTEGRATION_TEST=1 uv run pytest tests/test_catalog_live.py
 
 What it proves is the half the mocked tests cannot: that OpenMetadata accepts
-the entities as sent, that publishing twice leaves one set behind, and that the
+the entities as sent, that publishing twice leaves one set behind, that each
+container comes back carrying its classification tag and no owner, and that the
 lineage comes back out of the API rather than only looking right in the UI.
 """
 
@@ -23,12 +24,15 @@ from typer.testing import CliRunner
 from bio_governance.catalog import (
     OpenMetadataClient,
     OpenMetadataConfig,
+    classification_tag_fqn,
     fully_qualified_name,
     lineage_edges,
     publish_study,
     study_identifiers,
 )
 from bio_governance.cli import app
+from bio_governance.models import Classification
+from conftest import validate_declaration
 
 INTEGRATION_VAR = "OPENMETADATA_INTEGRATION_TEST"
 
@@ -61,6 +65,7 @@ def study(tmp_path: Path) -> tuple[Path, Path]:
 
     report = results / "quality" / "dq-report.json"
     assert runner.invoke(app, ["dq", "run", str(raw), "--json-out", str(report)]).exit_code == 0
+    validate_declaration(raw, results)
     return raw, results
 
 
@@ -84,6 +89,10 @@ def test_publishing_twice_leaves_seven_assets_and_six_edges(
         container = client.get_container(fully_qualified_name(identifier))
         # The canonical identity survives the round trip through the catalogue.
         assert container["fullPath"] == identifier.uri
+        # So does the classification; ownership was never sent.
+        tags = [tag["tagFQN"] for tag in container.get("tags") or []]
+        assert classification_tag_fqn(Classification.INTERNAL) in tags
+        assert not container.get("owners")
 
     published = {
         (edge.from_identifier, edge.to_identifier) for edge in lineage_edges(first.study_id)

@@ -362,7 +362,7 @@ def test_governance_evaluate_writes_the_structured_report(tmp_path: Path) -> Non
     assert result.exit_code == 0
     document = json.loads(report_path.read_text(encoding="utf-8"))
     assert document["decision"] == "ready"
-    assert len(document["checks"]) == 5
+    assert len(document["checks"]) == 7
     assert str(report_path) in result.output
 
 

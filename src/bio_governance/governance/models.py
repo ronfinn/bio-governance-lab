@@ -41,6 +41,8 @@ class GovernanceCheck(StrEnum):
     DATA_QUALITY = "data_quality"
     CURATED_OUTPUTS = "curated_outputs"
     LINEAGE_EVIDENCE = "lineage_evidence"
+    OWNERSHIP = "ownership"
+    CLASSIFICATION = "classification"
 
 
 class GovernanceCheckStatus(StrEnum):

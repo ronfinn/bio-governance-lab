@@ -105,6 +105,14 @@ def test_ownership_rejects_incomplete_records(owner: str, steward: str, contact:
         Ownership(owner=owner, steward=steward, contact=contact)
 
 
+def test_ownership_refuses_a_field_nobody_defined() -> None:
+    """An ignored ``team`` would look like evidence for something nothing reads."""
+    with pytest.raises(ValidationError, match="team"):
+        Ownership.model_validate(
+            {"owner": "Platform", "steward": "Ron Finn", "contact": "r@example.org", "team": "X"}
+        )
+
+
 def test_provenance_defaults_to_synthetic_with_no_upstream(provenance: Provenance) -> None:
     assert provenance.synthetic is True
     assert provenance.upstream == ()

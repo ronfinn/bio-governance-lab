@@ -3,8 +3,8 @@
 OpenMetadata ships an official Python SDK, ``openmetadata-ingestion``. It is
 not used here. Resolving it for this project's Python brings in around 130
 transitive packages — dbt-core, boto3, grpcio, numpy and the Kubernetes client
-among them — for a milestone that issues five kinds of request against four
-documented endpoints. The published REST API is the same interface the SDK
+among them — for a client that issues eight kinds of request, five of them
+writes, against documented endpoints. The published REST API is the same interface the SDK
 calls, so this module calls it directly over ``httpx`` and the project keeps a
 dependency list a reader can hold in their head.
 
@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 
+from bio_governance.catalog.mapping import classification_tag_fqn
 from bio_governance.catalog.models import CatalogAsset, CatalogError, OpenMetadataConfig
 
 #: How long any single call may take. A local server that has not answered in
@@ -113,11 +114,51 @@ class OpenMetadataClient:
         )
         return _text(payload, "fullyQualifiedName", "storage service")
 
+    def upsert_classification(self, *, name: str, display_name: str, description: str) -> str:
+        """Create or update a mutually exclusive Classification, and return its FQN.
+
+        Mutually exclusive is what makes it a *classification* in OpenMetadata's
+        own terms rather than a set of categories: the server refuses an entity
+        carrying two of its tags at once.
+        """
+        payload = self._request(
+            "PUT",
+            "/v1/classifications",
+            json={
+                "name": name,
+                "displayName": display_name,
+                "description": description,
+                "mutuallyExclusive": True,
+            },
+        )
+        return _text(payload, "fullyQualifiedName", f"classification {name}")
+
+    def upsert_tag(self, *, name: str, classification: str, description: str) -> str:
+        """Create or update one tag of a classification, and return its FQN."""
+        payload = self._request(
+            "PUT",
+            "/v1/tags",
+            json={"name": name, "classification": classification, "description": description},
+        )
+        return _text(payload, "fullyQualifiedName", f"tag {classification}.{name}")
+
     def upsert_container(self, asset: CatalogAsset, *, service: str) -> str:
         """Create or update one container, and return its entity ID.
 
         The ID is what the lineage API works in, so publishing an edge needs
         the containers to exist first.
+
+        A classified asset carries its classification as a tag label, which is
+        why the classification's tags must exist before any container does.
+        ``asset.ownership`` is deliberately not sent: OpenMetadata's ``owners``
+        are references, by server-assigned UUID, to Users or Teams it already
+        holds, and this project provisions neither.
+
+        On a ``PUT``, OpenMetadata *merges* the request's tags into those the
+        container already has, then enforces mutual exclusivity. Re-sending the
+        same classification is therefore a no-op, and a changed one is refused
+        rather than silently doubled: the server will not hold two tags of a
+        mutually exclusive classification.
         """
         body: dict[str, Any] = {
             "name": asset.name,
@@ -130,6 +171,15 @@ class OpenMetadataClient:
         }
         if asset.size_bytes is not None:
             body["size"] = asset.size_bytes
+        if asset.classification is not None:
+            body["tags"] = [
+                {
+                    "tagFQN": classification_tag_fqn(asset.classification),
+                    "source": "Classification",
+                    "labelType": "Manual",
+                    "state": "Confirmed",
+                }
+            ]
         if asset.columns:
             body["dataModel"] = {
                 "isPartitioned": False,
@@ -164,8 +214,8 @@ class OpenMetadataClient:
         )
 
     def get_container(self, fqn: str) -> dict[str, Any]:
-        """Fetch a published container by its fully qualified name."""
-        return self._request("GET", f"/v1/containers/name/{fqn}")
+        """Fetch a published container, with its tags, by its fully qualified name."""
+        return self._request("GET", f"/v1/containers/name/{fqn}", params={"fields": "tags"})
 
     def get_lineage(self, fqn: str, *, upstream: int = 1, downstream: int = 1) -> dict[str, Any]:
         """Fetch the lineage graph around a container, as OpenMetadata holds it."""

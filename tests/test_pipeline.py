@@ -1,10 +1,10 @@
 """Tests for the governance-gated Nextflow pipeline.
 
 The pipeline's claim is that raw data cannot reach the curated directory unless
-both gates pass — the contracts, and then data quality — so the tests that
-matter run Nextflow for real. They are skipped where Nextflow is not installed;
-the static checks below still hold the pipeline's parameter surface, process
-names and gate ordering in place.
+every gate passes — the study's governance declaration, the contracts, and then
+data quality — so the tests that matter run Nextflow for real. They are skipped
+where Nextflow is not installed; the static checks below still hold the
+pipeline's parameter surface, process names and gate ordering in place.
 """
 
 import json
@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PIPELINE = REPO_ROOT / "pipelines" / "nextflow" / "main.nf"
 CONFIG = REPO_ROOT / "pipelines" / "nextflow" / "nextflow.config"
 CONTRACTS = REPO_ROOT / "contracts"
+GOVERNANCE = REPO_ROOT / "governance" / "studies"
 
 runner = CliRunner()
 
@@ -37,8 +38,14 @@ def generated_study(tmp_path: Path, *injections: str) -> Path:
     return tmp_path / "BIO-001"
 
 
-def run_pipeline(tmp_path: Path, study_dir: Path) -> subprocess.CompletedProcess[str]:
-    """Run the pipeline over study_dir, keeping every artefact inside tmp_path."""
+def run_pipeline(
+    tmp_path: Path, study_dir: Path, governance_dir: Path = GOVERNANCE
+) -> subprocess.CompletedProcess[str]:
+    """Run the pipeline over study_dir, keeping every artefact inside tmp_path.
+
+    ``governance_dir`` defaults to the committed declarations, so the shipped
+    BIO-001.yaml is what a clean run is gated on.
+    """
     return subprocess.run(
         [
             "nextflow",
@@ -56,6 +63,8 @@ def run_pipeline(tmp_path: Path, study_dir: Path) -> subprocess.CompletedProcess
             str(CONTRACTS / "samples.v1.yaml"),
             "--compounds_contract",
             str(CONTRACTS / "compounds.v1.yaml"),
+            "--governance_dir",
+            str(governance_dir),
             "--outdir",
             str(tmp_path / "results"),
         ],
@@ -74,6 +83,7 @@ def test_pipeline_files_are_present() -> None:
 def test_the_gates_are_named_in_the_process_names() -> None:
     script = PIPELINE.read_text(encoding="utf-8")
 
+    assert "process GOVERNANCE_METADATA_GATE" in script
     assert "process CONTRACT_GATE_COMPOUNDS" in script
     assert "process CONTRACT_GATE_SAMPLES" in script
     assert "process RUN_DATA_QUALITY" in script
@@ -85,13 +95,17 @@ def test_the_gates_are_named_in_the_process_names() -> None:
 def test_the_pipeline_declares_the_documented_parameters() -> None:
     config = CONFIG.read_text(encoding="utf-8")
 
-    for name in ("study_dir", "samples_contract", "compounds_contract", "outdir"):
+    for name in ("study_dir", "governance_dir", "samples_contract", "compounds_contract", "outdir"):
         assert name in config
 
 
 def test_curation_never_runs_before_the_gates() -> None:
     """Each stage must consume the previous one's output, not the study directly."""
     script = PIPELINE.read_text(encoding="utf-8")
+
+    metadata_call = script.index("GOVERNANCE_METADATA_GATE(\n")
+    compounds_call = script.index("CONTRACT_GATE_COMPOUNDS(\n", metadata_call)
+    assert "metadata_passed" in script[compounds_call : compounds_call + 200]
 
     quality_call = script.index("RUN_DATA_QUALITY(\n")
     assert "samples_passed" in script[quality_call : quality_call + 200]
@@ -104,6 +118,7 @@ def test_curation_never_runs_before_the_gates() -> None:
 
     governance_call = script.index("EVALUATE_GOVERNANCE(\n", lineage_call)
     assert "lineage" in script[governance_call : governance_call + 400]
+    assert "metadata_passed" in script[governance_call : governance_call + 400]
 
 
 @needs_nextflow
@@ -133,10 +148,61 @@ def test_clean_data_passes_the_gate_and_is_curated(tmp_path: Path) -> None:
     assert "bio://BIO-001/raw/samples" in [d["name"] for d in events[0]["inputs"]]
     assert "bio://BIO-001/curated/samples" in [d["name"] for d in events[1]["outputs"]]
 
+    metadata = tmp_path / "results" / "BIO-001" / "metadata" / "governance-metadata.json"
+    declared = json.loads(metadata.read_text(encoding="utf-8"))
+    assert declared["passed"] is True
+    assert declared["classification"] == "internal"
+
     governance = tmp_path / "results" / "BIO-001" / "governance" / "governance-report.json"
     report = json.loads(governance.read_text(encoding="utf-8"))
     assert report["decision"] == "ready"
-    assert [check["status"] for check in report["checks"]] == ["pass"] * 5
+    assert [check["status"] for check in report["checks"]] == ["pass"] * 7
+    assert {check["check_id"] for check in report["checks"]} >= {"ownership", "classification"}
+
+
+def assert_nothing_downstream_was_published(results: Path) -> None:
+    """A run stopped at the metadata gate leaves no evidence from later processes."""
+    for directory in ("contracts", "quality", "curated", "lineage", "governance"):
+        assert not (results / directory).exists(), directory
+
+
+@needs_nextflow
+def test_a_study_without_a_governance_declaration_stops_at_the_first_gate(
+    tmp_path: Path,
+) -> None:
+    """Well-formed, high-quality data is not curated if nobody has declared it."""
+    study = generated_study(tmp_path)
+    undeclared = tmp_path / "no-declarations"
+    undeclared.mkdir()
+
+    result = run_pipeline(tmp_path, study, governance_dir=undeclared)
+
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert "Error executing process > 'GOVERNANCE_METADATA_GATE" in output
+    assert "CONTRACT_GATE_COMPOUNDS" not in output
+    assert_nothing_downstream_was_published(tmp_path / "results" / "BIO-001")
+
+
+@needs_nextflow
+def test_an_invalid_governance_declaration_stops_at_the_first_gate(tmp_path: Path) -> None:
+    study = generated_study(tmp_path)
+    declarations = tmp_path / "declarations"
+    declarations.mkdir()
+    (declarations / "BIO-001.yaml").write_text(
+        (GOVERNANCE / "BIO-001.yaml")
+        .read_text(encoding="utf-8")
+        .replace("classification: internal", "classification: secret"),
+        encoding="utf-8",
+    )
+
+    result = run_pipeline(tmp_path, study, governance_dir=declarations)
+
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert "Error executing process > 'GOVERNANCE_METADATA_GATE" in output
+    assert "classification 'secret'" in output
+    assert_nothing_downstream_was_published(tmp_path / "results" / "BIO-001")
 
 
 @needs_nextflow

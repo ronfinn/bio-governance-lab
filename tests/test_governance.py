@@ -25,7 +25,14 @@ from bio_governance.governance import (
     GovernanceReport,
     evaluate_governance,
 )
-from conftest import CONTRACTS_DIR, build_results, rewrite_csv
+from conftest import (
+    CONTRACTS_DIR,
+    GOVERNANCE_DIR,
+    METADATA_EVIDENCE,
+    build_results,
+    rewrite_csv,
+    validate_declaration,
+)
 
 runner = CliRunner()
 
@@ -139,7 +146,7 @@ def test_a_warning_without_a_failure_asks_for_review() -> None:
     assert not report.ready
 
 
-# --- the five checks ------------------------------------------------------
+# --- the seven checks -----------------------------------------------------
 
 
 def test_a_failing_samples_contract_blocks_the_study(tmp_path: Path) -> None:
@@ -249,6 +256,147 @@ def test_lineage_naming_another_study_blocks_the_study(tmp_path: Path) -> None:
     failed = next(c for c in report.checks if c.check_id is GovernanceCheck.LINEAGE_EVIDENCE)
     assert failed.status is GovernanceCheckStatus.FAIL
     assert "outputs" in failed.message
+
+
+# --- ownership and classification -----------------------------------------
+
+
+def redeclare(results: Path, tmp_path: Path, text: str) -> None:
+    """Replace the metadata evidence with the validator's verdict on ``text``.
+
+    The declaration is written under tmp_path and judged by the same command
+    the pipeline's gate runs, against the same generated study. The evidence is
+    never hand-written: governance has to be reading what the validator said.
+    """
+    declaration = tmp_path / "declaration.yaml"
+    declaration.write_text(text, encoding="utf-8")
+    validate_declaration(tmp_path / "data" / "BIO-001", results, declaration, expect=1)
+
+
+SHIPPED = (GOVERNANCE_DIR / "BIO-001.yaml").read_text(encoding="utf-8")
+
+
+def test_a_valid_declaration_passes_both_checks_and_names_who_answers(tmp_path: Path) -> None:
+    report = evaluate_governance(build_results(tmp_path))
+
+    found = {c.check_id: c for c in report.checks}
+    assert found[GovernanceCheck.OWNERSHIP].passed
+    assert "Avery Example" in found[GovernanceCheck.OWNERSHIP].message
+    assert "Jordan Example" in found[GovernanceCheck.OWNERSHIP].message
+    assert found[GovernanceCheck.CLASSIFICATION].passed
+    assert "internal" in found[GovernanceCheck.CLASSIFICATION].message
+
+
+def test_missing_governance_metadata_cannot_be_ready(tmp_path: Path) -> None:
+    """No declaration means no evidence for either claim, whatever else passed."""
+    results = build_results(tmp_path)
+    (results / METADATA_EVIDENCE).unlink()
+
+    report = evaluate_governance(results)
+
+    assert statuses(report)[GovernanceCheck.OWNERSHIP] is GovernanceCheckStatus.FAIL
+    assert statuses(report)[GovernanceCheck.CLASSIFICATION] is GovernanceCheckStatus.FAIL
+    assert report.decision is GovernanceDecision.BLOCKED
+    others = [c for c in report.checks if c.check_id not in _METADATA_CHECKS]
+    assert all(c.passed for c in others)
+
+
+_METADATA_CHECKS = {GovernanceCheck.OWNERSHIP, GovernanceCheck.CLASSIFICATION}
+
+
+def test_an_invalid_classification_fails_classification_and_not_ownership(
+    tmp_path: Path,
+) -> None:
+    results = build_results(tmp_path)
+    redeclare(
+        results, tmp_path, SHIPPED.replace("classification: internal", "classification: secret")
+    )
+
+    report = evaluate_governance(results)
+
+    assert statuses(report)[GovernanceCheck.CLASSIFICATION] is GovernanceCheckStatus.FAIL
+    assert statuses(report)[GovernanceCheck.OWNERSHIP] is GovernanceCheckStatus.PASS
+    assert report.decision is GovernanceDecision.BLOCKED
+
+
+def test_a_missing_steward_fails_ownership_and_not_classification(tmp_path: Path) -> None:
+    results = build_results(tmp_path)
+    redeclare(results, tmp_path, SHIPPED.replace("  steward: Jordan Example\n", ""))
+
+    report = evaluate_governance(results)
+
+    failed = next(c for c in report.checks if c.check_id is GovernanceCheck.OWNERSHIP)
+    assert failed.status is GovernanceCheckStatus.FAIL
+    assert "steward" in failed.message
+    assert statuses(report)[GovernanceCheck.CLASSIFICATION] is GovernanceCheckStatus.PASS
+    assert report.decision is GovernanceDecision.BLOCKED
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        SHIPPED.replace("study_id: BIO-001", "study_id: BIO-002"),
+        "study_id: [BIO-001\n",
+        SHIPPED + "retention_days: 30\n",
+    ],
+    ids=["another-study", "malformed-yaml", "unsupported-field"],
+)
+def test_a_declaration_that_fails_as_a_whole_fails_both_checks(tmp_path: Path, text: str) -> None:
+    results = build_results(tmp_path)
+    redeclare(results, tmp_path, text)
+
+    report = evaluate_governance(results)
+
+    assert statuses(report)[GovernanceCheck.OWNERSHIP] is GovernanceCheckStatus.FAIL
+    assert statuses(report)[GovernanceCheck.CLASSIFICATION] is GovernanceCheckStatus.FAIL
+    assert report.decision is GovernanceDecision.BLOCKED
+
+
+def test_metadata_evidence_for_another_study_blocks_the_study(tmp_path: Path) -> None:
+    """BIO-002's valid declaration, judged against BIO-002, is no evidence for BIO-001."""
+    results = build_results(tmp_path)
+    other = tmp_path / "other"
+    generated = runner.invoke(
+        app, ["demo", "generate", "--study", "BIO-002", "--output", str(other)]
+    )
+    assert generated.exit_code == 0, generated.output
+    validate_declaration(other / "BIO-002", results)
+
+    report = evaluate_governance(results)
+
+    failed = next(c for c in report.checks if c.check_id is GovernanceCheck.OWNERSHIP)
+    assert failed.status is GovernanceCheckStatus.FAIL
+    assert "BIO-002" in failed.message
+    assert report.decision is GovernanceDecision.BLOCKED
+
+
+def test_evidence_edited_to_claim_it_passed_still_fails(tmp_path: Path) -> None:
+    """``passed`` is computed from the problems, so editing it changes nothing."""
+    results = build_results(tmp_path)
+    redeclare(
+        results, tmp_path, SHIPPED.replace("classification: internal", "classification: secret")
+    )
+    path = results / METADATA_EVIDENCE
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["passed"] = True
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    report = evaluate_governance(results)
+
+    assert statuses(report)[GovernanceCheck.CLASSIFICATION] is GovernanceCheckStatus.FAIL
+    assert report.decision is GovernanceDecision.BLOCKED
+
+
+def test_a_restricted_study_is_as_ready_as_a_public_one(tmp_path: Path) -> None:
+    """The check is that a classification was declared, not what it permits."""
+    results = build_results(tmp_path)
+    declaration = tmp_path / "restricted.yaml"
+    declaration.write_text(SHIPPED.replace("internal", "restricted"), encoding="utf-8")
+    validate_declaration(tmp_path / "data" / "BIO-001", results, declaration)
+
+    report = evaluate_governance(results)
+
+    assert report.decision is GovernanceDecision.READY
 
 
 # --- serialization and the unreadable case --------------------------------

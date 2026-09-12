@@ -7,8 +7,10 @@ never starts one. Run it against a local Docker quickstart with::
 
 What it proves is the half the mocked tests cannot: that DataHub accepts the
 Metadata Change Proposals as sent, that publishing twice leaves one set of
-datasets behind, and that the lineage comes back out of the SDK rather than only
-looking right in the UI.
+datasets behind, that the owner, the data steward and the glossary term come
+back on every dataset — the owners being users DataHub has no account for — and
+that the lineage comes back out of the SDK rather than only looking right in
+the UI.
 """
 
 from __future__ import annotations
@@ -18,17 +20,19 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from datahub.emitter.mce_builder import make_user_urn
 
 from bio_governance.catalog import (
     CANONICAL_PROPERTY,
     dataset_urn,
     lineage_edges,
     study_identifiers,
+    term_urn,
 )
 from bio_governance.catalog.datahub_client import DataHubClient
 from bio_governance.catalog.datahub_publish import publish_study_to_datahub
 from bio_governance.catalog.models import DataHubConfig
-from bio_governance.models import AssetIdentifier
+from bio_governance.models import AssetIdentifier, Classification
 
 INTEGRATION_VAR = "DATAHUB_INTEGRATION_TEST"
 
@@ -66,6 +70,13 @@ def test_publishing_twice_leaves_seven_datasets_and_six_edges(
         # The canonical identity survives the round trip through the catalogue.
         assert properties.qualifiedName == identifier.uri
         assert (properties.customProperties or {})[CANONICAL_PROPERTY] == identifier.uri
+        # The projected governance comes back as it was declared, exactly once.
+        urn = dataset_urn(identifier)
+        assert client.get_glossary_terms(urn) == (term_urn(Classification.INTERNAL),)
+        assert client.get_owners(urn) == (
+            (make_user_urn("Avery Example"), "BUSINESS_OWNER"),
+            (make_user_urn("Jordan Example"), "DATA_STEWARD"),
+        )
 
     published = {
         (dataset_urn(AssetIdentifier.parse(edge.from_identifier)), dataset_urn(target))

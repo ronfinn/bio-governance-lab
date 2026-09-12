@@ -10,15 +10,17 @@ subject data ever belongs in this repository.
 
 ## Current milestone
 
-Milestone 11: domain models, CLI, tests, CI, deterministic synthetic study
-generation, YAML data contracts and contract validation, study-level
-data-quality checks, a Nextflow pipeline that gates curation on both,
-OpenLineage provenance events for a successful run, publication of the governed
-assets into a local OpenMetadata instance and into a local DataHub, one
-deterministic READY/REVIEW/BLOCKED governance decision derived from that
-evidence, a read-only MCP server exposing that evidence to an AI client, and
-`docs/catalog-comparison.md` — the written case study comparing the two
-catalogue integrations.
+Milestone 12: domain models, CLI, tests, CI, deterministic synthetic study
+generation, a committed per-study governance declaration (owner, steward,
+contact, classification) and its validation, YAML data contracts and contract
+validation, study-level data-quality checks, a Nextflow pipeline that gates
+curation on all three, OpenLineage provenance events for a successful run,
+publication of the governed assets — with their classification, and in DataHub
+their ownership — into a local OpenMetadata instance and into a local DataHub,
+one deterministic READY/REVIEW/BLOCKED governance decision derived from seven
+checks over that evidence, a read-only MCP server exposing that evidence to an
+AI client, and `docs/catalog-comparison.md` — the written case study comparing
+the two catalogue integrations.
 
 **Not yet implemented, and not to be added without being asked:** Marquez,
 AI-agent governance in the sense of an agent that acts. The pipeline is
@@ -28,18 +30,26 @@ dashboard or database, and no numeric score. Lineage has no server, HTTP or
 Kafka transport, database, failed-run events or custom facets, and does not use
 Nextflow's own experimental lineage feature. The catalogue integration is one
 local OpenMetadata over REST: no `openmetadata-ingestion` SDK, no OpenMetadata
-`Pipeline`, glossary, tag, tier, owner or custom-property entities, no sync
+`Pipeline`, glossary, tier, owner, user, team or custom-property entities (one
+`Classification` and its four tags are the only governance entities), no
+`PATCH` for reclassification, no sync
 daemon or reconciliation, no catalogue abstraction interface, and no pipeline
 wiring — publication stays an explicit post-run command. The DataHub
 integration is one local quickstart over its SDK: no ingestion source, recipe or
-scheduled crawl, no Kafka emitter, no domains, glossary terms, owners, tags,
-assertions, data products, structured properties or forms, no policies, soft
+scheduled crawl, no Kafka emitter, no domains, tags, users or groups,
+assertions, data products, structured properties, forms or custom ownership
+types (the classification glossary and the `ownership` aspect are the only
+governance metadata), no policies, soft
 deletes or stateful ingestion, no DataHub Cloud, and no pipeline wiring either.
 There is still no `CatalogAdapter`, `BaseCatalog` or plugin registry, and the
 comparison in `docs/catalog-comparison.md` is the argument against adding one:
 `health()`, `publish()` and `get()` are the only three things the two
 implementations share, and every difference beneath them is the content of the
-case study. The MCP server is
+case study. Governance metadata is one closed YAML declaration per study and
+no more: no policy engine, rule language, OPA, Cedar or Rego, no approval,
+stewardship, notification or e-signature workflow, no RBAC, ABAC, IAM, SSO,
+LDAP or user provisioning, no teams or organisational graph, and nothing that
+decides what a classification permits. The MCP server is
 read-only, local and stdio-only: no HTTP or SSE transport, no authentication,
 OAuth, reverse proxy or container, no prompts, no catalogue search, no
 `read_file` tool, and no tool that writes anything at all.
@@ -54,6 +64,12 @@ uv run ruff format .        # format
 uv run mypy src             # type-check
 uv run bio-gov --help       # the CLI
 uv run bio-gov demo generate  # write a synthetic study to data/raw/
+
+# validate a study's governance declaration (owner, steward, classification)
+uv run bio-gov governance metadata validate governance/studies/BIO-001.yaml \
+  --study-dir data/raw/BIO-001
+uv run bio-gov governance metadata validate governance/studies/BIO-001.yaml \
+  --study-dir data/raw/BIO-001 --json-out results/BIO-001/metadata/governance-metadata.json
 
 # validate generated data against a contract
 uv run bio-gov contract validate contracts/samples.v1.yaml data/raw/BIO-001/samples.csv
@@ -88,6 +104,7 @@ uv run bio-gov lineage emit data/raw/BIO-001 results/BIO-001/curated \
 # run the governance-gated pipeline (needs Nextflow and a JVM, installed separately)
 nextflow run pipelines/nextflow/main.nf
 nextflow run pipelines/nextflow/main.nf --study_dir data/raw/BIO-002   # a broken study
+nextflow run pipelines/nextflow/main.nf --governance_dir /tmp/empty     # an undeclared study
 ```
 
 CI runs `ruff check .`, `ruff format --check .`, `mypy src` and `pytest`. Run
@@ -111,8 +128,10 @@ all four before committing.
   run identities and `emit_curation_lineage`. Export new public names from
   `lineage/__init__.py`.
 - `src/bio_governance/governance/` — `models.py` for the decision, status,
-  check and report models, `evaluate.py` for the five checks over a results
-  directory. Export new public names from `governance/__init__.py`.
+  check and report models, `evaluate.py` for the seven checks over a results
+  directory, `metadata.py` for the governance declaration's model, its
+  validation result and `validate_metadata`. Export new public names from
+  `governance/__init__.py`.
 - `src/bio_governance/mcp/` — `evidence.py` for reading the results root (no
   MCP import anywhere in it), `server.py` for the tools, resources and
   read-only annotations. Export new public names from `mcp/__init__.py`.
@@ -125,11 +144,15 @@ all four before committing.
   except the two DataHub modules that import the SDK, which stay out of it so
   the CLI does not pay for the metadata model on every command.
 - `contracts/` — the contract definitions themselves, as YAML. Committed.
+- `governance/studies/` — one governance declaration per study,
+  `<STUDY>.yaml`. Committed. Synthetic people and `example.org` addresses only;
+  never real personnel data.
 - `pipelines/nextflow/` — `main.nf` holds the DSL2 workflow, `nextflow.config`
   its parameters and manifest. Nothing else belongs here.
 - `src/bio_governance/cli.py` — the `bio-gov` Typer app. The `demo` sub-app
   hosts generation commands, the `contract` sub-app hosts validation, the `dq`
-  sub-app hosts quality evaluation, the `lineage` sub-app hosts emission, and
+  sub-app hosts quality evaluation, the `lineage` sub-app hosts emission,
+  `governance` hosts `evaluate` and `governance metadata` hosts `validate`, and
   `catalog openmetadata` hosts `health`, `publish` and `get`, and the `mcp`
   sub-app hosts `serve`.
 - `infra/openmetadata/` — the README for the official local Docker quickstart,
@@ -139,14 +162,16 @@ all four before committing.
   and nothing else. Its compose file lives in `~/.datahub/`, not here.
 - `tests/` — mirrors the source modules. Shared fixtures live in `conftest.py`.
 - `docs/` — `architecture.md` (decisions), `governance-model.md` (meaning),
-  `synthetic-data.md` (the generated study), `data-contracts.md` (the contract
+  `synthetic-data.md` (the generated study), `governance-metadata.md` (the
+  declaration, its validation, the gate, the two checks, and how each catalogue
+  represents it), `data-contracts.md` (the contract
   format and validation), `data-quality.md` (the checks and the evidence),
   `lineage.md` (OpenLineage job, run, datasets and transport),
   `openmetadata.md` (containers, identity mapping, auth, idempotence, lineage),
   `datahub.md` (datasets and aspects, the URN mapping, the SDK decision,
   idempotence), `catalog-comparison.md` (the two integrations side by side, and
   the limits of the experiment),
-  `governance-evaluation.md` (the decision model, the five checks, exit codes),
+  `governance-evaluation.md` (the decision model, the seven checks, exit codes),
   `mcp-server.md` (the read-only boundary, the tools and resources, stdio,
   the Inspector, results-root confinement).
 - `data/` — generated output. Git-ignored; never commit generated data.
@@ -327,11 +352,47 @@ all four before committing.
   governance score. A report cannot claim a verdict its checks do not support.
 - **The governance check vocabulary is closed**, like the contract rules and the
   quality checks. Adding a check means adding a named `GovernanceCheck` member.
-  Five checks do not need a policy engine, a rule language or Rego.
-- **A check must read real evidence.** Ownership, classification, retention,
-  access control and catalogue presence are not checks yet, because nothing in
-  this project produces evidence for them and a check that reads nothing always
-  passes.
+  Seven checks do not need a policy engine, a rule language or Rego.
+- **A check must read real evidence.** `ownership` and `classification` became
+  checks when a committed declaration gave them evidence. Retention, access
+  control and catalogue presence are not checks yet, because nothing in this
+  project produces evidence for them and a check that reads nothing always
+  passes. Never derive a check from an `Asset`'s default or example values.
+- **Governance metadata is a declaration, not a contract.** One closed YAML
+  file per study in `governance/studies/`, validated by
+  `governance/metadata.py`, which shares no code with `contracts/`. Its
+  `ownership` is the domain model's `Ownership` and its `classification` the
+  `Classification` enum — never a second vocabulary. Adding a field means a
+  model change and a reason something reads it.
+- **Declarations are closed.** `GovernanceMetadata` and `Ownership` forbid
+  extra fields, so an unread field is a problem rather than silently ignored.
+- **A declaration is judged against a study, and per part.** The study comes
+  from the study directory's name; every problem is attributed to
+  `declaration`, `study_id`, `ownership` or `classification`, and all are
+  reported in one pass. The `ownership` check fails only for declaration,
+  study or ownership problems; `classification` likewise. Malformed YAML is
+  exit 1 (defective evidence); only an unreadable file or study is exit 2.
+- **The metadata gate is first and structural.** `GOVERNANCE_METADATA_GATE`
+  feeds `CONTRACT_GATE_COMPOUNDS` and joins `EVALUATE_GOVERNANCE`. The
+  declaration is not opened with `checkIfExists`, so a missing one is reported
+  by the gate, not by Nextflow.
+- **No check decides what a classification permits.** A `restricted` study
+  passes exactly as a `public` one does. Anything else is a policy engine.
+- **Catalogues project only validated evidence.** Publication reads
+  `metadata/governance-metadata.json` from the results directory through
+  `governance_metadata()` in `catalog/publish.py`, shared by both catalogues,
+  and refuses missing, failed or wrong-study evidence before the first request.
+  Never publish from the YAML directly.
+- **Each catalogue gets the governance its model can honestly hold.**
+  OpenMetadata: classification as a mutually exclusive `Classification` with
+  four tags and a tag label per container; ownership *not sent*, because owners
+  must be existing users or Group teams addressed by server UUID, and this
+  project provisions no accounts — do not smuggle it into a description or a
+  custom property. DataHub: classification as a glossary term under one node,
+  ownership as the `ownership` aspect (`BUSINESS_OWNER`, `DATA_STEWARD`) with
+  corpuser URNs from `make_user_urn`; no corpuser or group is created, and
+  `contact` is not projected. Glossary terms carry the SDK's own audit stamp,
+  actor `urn:li:corpuser:__ingestion` and time `0` — never the clock.
 - **Absent or incoherent evidence is a `FAIL`, not an exception.** Exit status 2
   is reserved for a results directory that cannot be read as a study at all —
   there is no verdict to give. Everything else is `BLOCKED`.
@@ -414,6 +475,20 @@ formats, the six-edge set, useful messages for connection and token failures,
 and that a second publication sends the same requests as the first. The live
 demonstration lives in `tests/test_catalog_live.py` and skips unless
 `OPENMETADATA_INTEGRATION_TEST=1`.
+
+Governance metadata tests load the shipped declarations from
+`governance/studies/` and validate each against a generated study of its name.
+Every kind of defect gets a test naming the part it is attributed to, one test
+proves all problems are reported together, one proves a partly valid
+declaration keeps the part that validated, and one proves an edited `passed`
+is ignored. Evidence for the governance and catalogue tests comes from
+`validate_declaration` in `conftest.py`, which runs the same command the gate
+runs — a broken declaration is written as YAML and judged, never hand-written
+as JSON. Both catalogue test files assert the same three refusals through
+`damage_governance_evidence`, the classification projection, and the ownership
+projection (or, for OpenMetadata, its absence). The pipeline tests run a
+missing and an invalid declaration through Nextflow and assert that nothing
+downstream is published.
 
 Governance tests evaluate evidence that was actually produced: `build_results`
 in `conftest.py` runs the same commands `main.nf` does, and a test then damages

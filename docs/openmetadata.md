@@ -104,6 +104,8 @@ not. That asymmetry is the reason `AssetIdentifier` was not replaced by an FQN.
 - `fileFormats` — `csv` for the three datasets, `json` for the report
 - `size` in bytes and `numberOfObjects`
 - a `dataModel` of columns, for `samples` and `compounds` only
+- a tag label for the study's classification, from its validated governance
+  declaration — `bio_governance_classification.internal` for BIO-001
 
 The columns come from the shipped YAML contracts, not from a CSV header: the
 contract is the file's *declared* structure, so publishing it puts the agreed
@@ -114,6 +116,35 @@ types map to OpenMetadata's in three entries — `string→STRING`, `integer→I
 `expression.csv` is a wide generated matrix and has no contract. It is published
 without a data model rather than with several hundred catalogue columns nobody
 would read.
+
+## Classification, and why not ownership
+
+Milestone 12 gave each study a validated governance declaration — owner,
+steward, contact and classification — and OpenMetadata receives half of it.
+
+The **classification** has an exact home. OpenMetadata's word for a controlled,
+mutually exclusive tag vocabulary is a *Classification*, so publication
+upserts one, `bio_governance_classification`, with `mutuallyExclusive: true`
+and a tag for each of the project's four values, and each container carries the
+declared value as a `Classification`-sourced, `Manual`, `Confirmed` tag label.
+The tags are upserted before the containers because a container cannot carry a
+tag that does not exist.
+
+The **ownership** does not. An OpenMetadata owner is an entity reference whose
+`id` is required: the UUID of a User or Group-type Team the server already
+holds. The declaration names people, and this project provisions no accounts,
+so no owner is sent — and neither of the workarounds is taken: a bot's `PUT`
+reverts a changed description on an existing entity, and a custom property
+would put a second, disagreeing "owner" beside OpenMetadata's own. Ownership
+stays canonical in `governance/studies/`. `publish` refuses, before any request,
+a study whose declaration evidence is missing or did not validate.
+
+On a `PUT`, OpenMetadata merges the request's tags into the container's existing
+ones and then enforces mutual exclusivity, so republishing the same
+classification changes nothing and a *changed* one is refused rather than
+doubled. These behaviours are read from the 1.13.4 server source, not observed
+in this milestone. The full account, with DataHub's contrasting model, is in
+[governance-metadata.md](governance-metadata.md).
 
 ## Lineage
 
@@ -172,7 +203,8 @@ quality run does.
 
 Every write is a `PUT`, and OpenMetadata's `PUT` routes are create-or-update.
 Publishing twice therefore addresses the same entities rather than creating a
-second set — for containers, for the service and for lineage edges alike — and
+second set — for containers, the service, the classification, its tags and
+lineage edges alike — and
 idempotence is a property of the requests rather than of bookkeeping this project
 does. After two consecutive publications the service holds seven containers, all
 still at entity version `0.1`, and `raw/samples` has two downstream edges.
@@ -186,7 +218,7 @@ is — see [datahub.md](datahub.md).)
 OpenMetadata ships an official Python SDK, `openmetadata-ingestion`. This
 project does not use it. Resolving it for this environment pulls in around 130
 transitive packages — dbt-core, boto3, grpcio, numpy and the Kubernetes client
-among them — to issue five kinds of request against four documented endpoints,
+among them — to issue eight kinds of request, five of them writes,
 against a project whose entire dependency list otherwise fits on one line. The
 REST API is the same interface the SDK calls, so the client calls it directly
 over `httpx`:
@@ -195,6 +227,8 @@ over `httpx`:
 | --- | --- |
 | health | `GET /v1/system/version` |
 | storage service | `PUT /v1/services/storageServices` |
+| classification | `PUT /v1/classifications` |
+| classification tag | `PUT /v1/tags` |
 | container | `PUT /v1/containers` |
 | lineage edge | `PUT /v1/lineage` |
 | read back | `GET /v1/containers/name/{fqn}` |
@@ -211,9 +245,12 @@ and a fake OpenMetadata that keys entities the way the real one does, so a
 duplicate would show up as a second entry. What is asserted is what this project
 controls — the configuration defaults, the clear error when a token is missing,
 the deterministic entity-name mapping, the seven prepared assets, the preserved
-`bio://` identity, the file formats, the six-edge set, useful messages for
-connection failures and rejected tokens, and that a second publication sends the
-same requests as the first.
+`bio://` identity, the file formats, the six-edge set, the mutually exclusive
+classification with its four tags, the declared tag on every container, the
+absence of any owner, tags existing before the containers that carry them, the
+refusal of missing, failed or wrong-study governance evidence, useful messages
+for connection failures and rejected tokens, and that a second publication sends
+the same requests as the first.
 
 `tests/test_catalog_live.py` is the live demonstration, skipped unless
 `OPENMETADATA_INTEGRATION_TEST=1`:
@@ -223,6 +260,10 @@ export OPENMETADATA_JWT_TOKEN=...
 OPENMETADATA_INTEGRATION_TEST=1 uv run pytest tests/test_catalog_live.py
 ```
 
+Since milestone 12 the live test also asserts the classification tag and the
+absence of owners on every container. It has not yet been run against a server
+with those assertions: OpenMetadata was not running during that milestone.
+
 CI never starts OpenMetadata and never needs it.
 
 ## Deferred
@@ -230,7 +271,9 @@ CI never starts OpenMetadata and never needs it.
 - **Pipeline wiring.** Catalogue publication stays a post-run command; the
   Nextflow pipeline must keep running with the server off.
 - **No OpenMetadata `Pipeline` entity**, no test-case or data-quality entities,
-  no glossary, tags, tiers or owners, and no custom properties.
+  no glossary, tiers, owners, users or teams, and no custom properties. One
+  Classification and its four tags are the only governance entities; a
+  reclassification is not `PATCH`ed.
 - **No DataHub, Marquez, MCP or AI-agent governance.**
 - **No sync daemon and no reconciliation.** Publication is something a person or
   a later orchestration step runs; nothing polls, and nothing deletes a

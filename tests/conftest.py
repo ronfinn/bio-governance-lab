@@ -81,9 +81,41 @@ def drop_vehicle_rows(study: Path) -> None:
 
 
 CONTRACTS_DIR = Path(__file__).resolve().parent.parent / "contracts"
+GOVERNANCE_DIR = Path(__file__).resolve().parent.parent / "governance" / "studies"
+
+#: Where the governance metadata gate's evidence sits under a results directory.
+METADATA_EVIDENCE = Path("metadata") / "governance-metadata.json"
 
 #: The datasets the pipeline gates, and the contract each is gated by.
 GATED_DATASETS = (("samples", "samples.v1.yaml"), ("compounds", "compounds.v1.yaml"))
+
+
+def validate_declaration(
+    study: Path, results: Path, declaration: Path | None = None, *, expect: int = 0
+) -> Path:
+    """Write the evidence ``GOVERNANCE_METADATA_GATE`` leaves, by running what it runs.
+
+    ``declaration`` defaults to the study's committed file under
+    ``governance/studies/``, so the shipped declarations are what is under test.
+    A test that needs a broken one writes it under tmp_path and passes it here;
+    the evidence is still the validator's own verdict, never hand-written JSON.
+    """
+    path = results / METADATA_EVIDENCE
+    outcome = CliRunner().invoke(
+        app,
+        [
+            "governance",
+            "metadata",
+            "validate",
+            str(declaration or GOVERNANCE_DIR / f"{study.name}.yaml"),
+            "--study-dir",
+            str(study),
+            "--json-out",
+            str(path),
+        ],
+    )
+    assert outcome.exit_code == expect, outcome.output
+    return path
 
 
 def build_results(tmp_path: Path) -> Path:
@@ -105,6 +137,7 @@ def build_results(tmp_path: Path) -> Path:
     run("demo", "generate", "--output", str(study.parent))
 
     results = tmp_path / "results" / "BIO-001"
+    validate_declaration(study, results)
     for dataset, contract in GATED_DATASETS:
         run(
             "contract",
@@ -155,6 +188,35 @@ def build_governance_report(results: Path) -> Path:
     return path
 
 
+def damage_governance_evidence(raw: Path, results: Path, tmp_path: Path, damage: str) -> None:
+    """Leave the metadata evidence missing, failed, or about another study.
+
+    Shared with the DataHub tests, because both catalogues must refuse the same
+    three things through the same helper. The evidence is always the
+    validator's own output, never hand-written.
+    """
+    if damage == "missing":
+        (results / METADATA_EVIDENCE).unlink()
+    elif damage == "failed":
+        declaration = tmp_path / "bad.yaml"
+        declaration.write_text("study_id: BIO-001\nclassification: secret\n", encoding="utf-8")
+        validate_declaration(raw, results, declaration, expect=1)
+    else:
+        other = tmp_path / "other"
+        generated = CliRunner().invoke(
+            app, ["demo", "generate", "--study", "BIO-002", "--output", str(other)]
+        )
+        assert generated.exit_code == 0, generated.output
+        validate_declaration(other / "BIO-002", results)
+
+
+REFUSALS = [
+    ("missing", "governance metadata evidence is missing"),
+    ("failed", "did not validate"),
+    ("another-study", "describes BIO-002, not BIO-001"),
+]
+
+
 @pytest.fixture
 def study_files(tmp_path: Path) -> tuple[Path, Path]:
     """A generated study and the results directory the pipeline would leave.
@@ -162,7 +224,8 @@ def study_files(tmp_path: Path) -> tuple[Path, Path]:
     Shared, because both catalogue integrations publish the same evidence and a
     second copy of this fixture is how the two would quietly start publishing
     different studies. Lighter than :func:`build_results`: the contract JSON and
-    the governance report are evidence a catalogue does not read.
+    the governance report are evidence a catalogue does not read. The governance
+    metadata evidence is one it does read, so it is here.
     """
     runner = CliRunner()
     result = runner.invoke(app, ["demo", "generate", "--output", str(tmp_path / "data")])
@@ -196,4 +259,5 @@ def study_files(tmp_path: Path) -> tuple[Path, Path]:
         ],
     )
     assert emitted.exit_code == 0, emitted.output
+    validate_declaration(raw, results)
     return raw, results

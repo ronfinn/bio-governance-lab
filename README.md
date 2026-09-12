@@ -6,18 +6,19 @@ This repository is a public portfolio project exploring how data governance —
 ownership, classification, lineage, contracts and quality — can be expressed as
 typed, tested, version-controlled code rather than as documents in a wiki.
 
-> **Status: milestone 11 — OpenMetadata versus DataHub comparison.** This
+> **Status: milestone 12 — ownership and classification evidence.** This
 > repository contains the core domain model, a deterministic generator for a
-> small synthetic study, YAML data contracts over the generated CSVs,
-> study-level data-quality checks, a Nextflow pipeline that puts both in front
-> of curation as gates, OpenLineage events recording what a governed run
-> produced, publication of those governed assets into a local OpenMetadata
-> instance and into a local DataHub, one deterministic READY/REVIEW/BLOCKED
-> decision derived from all of that evidence, a Model Context Protocol server
-> that lets an AI assistant read that decision without any way to change it, and
-> a written [case study](docs/catalog-comparison.md) comparing what the two
-> catalogue integrations actually demonstrated. See
-> [Deferred work](#deferred-work).
+> small synthetic study, a committed governance declaration per study stating
+> who owns it and how it is classified, YAML data contracts over the generated
+> CSVs, study-level data-quality checks, a Nextflow pipeline that puts all three
+> in front of curation as gates, OpenLineage events recording what a governed
+> run produced, publication of those governed assets — and their classification
+> and ownership — into a local OpenMetadata instance and into a local DataHub,
+> one deterministic READY/REVIEW/BLOCKED decision derived from all of that
+> evidence, a Model Context Protocol server that lets an AI assistant read that
+> decision without any way to change it, and a written
+> [case study](docs/catalog-comparison.md) comparing what the two catalogue
+> integrations actually demonstrated. See [Deferred work](#deferred-work).
 
 ## What is here today
 
@@ -26,6 +27,9 @@ typed, tested, version-controlled code rather than as documents in a wiki.
 - A URI-style asset identifier: `bio://BIO-001/raw/samples`.
 - A deterministic generator for a synthetic compound-perturbation study, with
   optional bad-data injection.
+- One small, closed YAML [governance declaration](docs/governance-metadata.md)
+  per study — owner, steward, contact, classification — validated against the
+  study it names, and the first gate in the pipeline.
 - Small YAML data contracts over the generated CSVs, and a validator that
   reports every violation rather than the first.
 - Six deterministic data-quality checks over the study as a whole, reported as
@@ -40,7 +44,7 @@ typed, tested, version-controlled code rather than as documents in a wiki.
   [DataHub](https://datahubproject.io) — a second catalogue, modelled DataHub's
   way rather than OpenMetadata's, and deliberately not behind an interface.
 - One deterministic governance decision — READY, REVIEW or BLOCKED — derived
-  from five checks over that evidence. Code decides; a model may only explain.
+  from seven checks over that evidence. Code decides; a model may only explain.
 - A read-only [MCP](https://modelcontextprotocol.io) server exposing that
   evidence to an AI assistant over stdio: six tools, two resources, and no way
   to write, recompute or override a decision.
@@ -58,6 +62,7 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.11+.
 uv sync
 uv run bio-gov --help
 uv run bio-gov demo generate
+uv run bio-gov governance metadata validate governance/studies/BIO-001.yaml --study-dir data/raw/BIO-001
 uv run bio-gov contract validate contracts/samples.v1.yaml data/raw/BIO-001/samples.csv
 uv run bio-gov dq run data/raw/BIO-001
 nextflow run pipelines/nextflow/main.nf
@@ -111,6 +116,53 @@ Four options deliberately write malformed data: `--inject-missing-sample-id`,
 contracts below detect them.
 
 See [Synthetic data](docs/synthetic-data.md) for the full description.
+
+## Governance metadata
+
+Before anything asks whether a study's files are well-formed, something has to
+say who answers for the study and how sensitive it is. That is one committed
+file per study:
+
+```yaml
+# governance/studies/BIO-001.yaml
+study_id: BIO-001
+classification: internal
+ownership:
+  owner: Avery Example
+  steward: Jordan Example
+  contact: bio-001-governance@example.org
+```
+
+`ownership` is the domain model's own `Ownership` and `classification` its own
+`Classification`, so there is still one vocabulary for each. The schema is
+closed — an unknown field is a problem, not something ignored — and the people
+are invented; `example.org` cannot reach anybody.
+
+```bash
+uv run bio-gov governance metadata validate governance/studies/BIO-001.yaml \
+  --study-dir data/raw/BIO-001 \
+  --json-out results/BIO-001/metadata/governance-metadata.json
+```
+
+```
+Governance metadata: governance/studies/BIO-001.yaml
+Study: BIO-001
+
+PASS
+Owner: Avery Example
+Steward: Jordan Example
+Contact: bio-001-governance@example.org
+Classification: internal
+```
+
+Every problem is reported in one pass and attributed to the part of the file it
+is about — the declaration as a whole, `study_id`, `ownership` or
+`classification` — and a declaration naming another study is refused. Exit
+status is `0` for a valid declaration, `1` for an invalid one (malformed YAML
+included) and `2` when the file or the study directory cannot be read. It is not
+a data contract: a contract describes one file's structure, a declaration
+states responsibility and sensitivity for a whole study, and the two share no
+code. See [Governance metadata](docs/governance-metadata.md).
 
 ## Data contracts
 
@@ -269,18 +321,22 @@ no `1`: emitting provenance is not a verdict. See [Lineage](docs/lineage.md).
 governance can gate processing:
 
 ```
-data/raw/<STUDY>/
-  -> CONTRACT_GATE_COMPOUNDS -> CONTRACT_GATE_SAMPLES -> RUN_DATA_QUALITY
+data/raw/<STUDY>/ + governance/studies/<STUDY>.yaml
+  -> GOVERNANCE_METADATA_GATE
+    -> CONTRACT_GATE_COMPOUNDS -> CONTRACT_GATE_SAMPLES -> RUN_DATA_QUALITY
        -> CURATE -> EMIT_OPENLINEAGE -> EVALUATE_GOVERNANCE
                           |
-      results/<STUDY>/{contracts/, quality/, curated/, lineage/, governance/}
+      results/<STUDY>/{metadata/, contracts/, quality/, curated/, lineage/, governance/}
 ```
 
-Structure is checked first — a malformed file cannot meaningfully be assessed
-for consistency — then the study as a whole. Each process consumes the previous
-one's output channel and nothing else, so `CURATE` cannot start until both
-contracts and all six checks have passed, and `bio-gov` exits non-zero on a
-failure, which terminates the run. `EMIT_OPENLINEAGE` consumes `CURATE`'s
+Responsibility is checked first — classification decides how data may be
+handled, so a study nobody has declared is not processed at all — then
+structure, because a malformed file cannot meaningfully be assessed for
+consistency, then the study as a whole. Each process consumes the previous
+one's output channel and nothing else, so `CURATE` cannot start until the
+declaration, both contracts and all six quality checks have passed, and
+`bio-gov` exits non-zero on a failure, which terminates the run. A study with
+no declaration, or an invalid one, stops at `GOVERNANCE_METADATA_GATE`. `EMIT_OPENLINEAGE` consumes `CURATE`'s
 output, so provenance is only ever recorded for a curated directory that exists.
 
 ```bash
@@ -289,6 +345,7 @@ nextflow run pipelines/nextflow/main.nf
 ```
 
 ```
+[a5/849091] Submitted process > GOVERNANCE_METADATA_GATE (BIO-001)
 [c6/45c610] Submitted process > CONTRACT_GATE_COMPOUNDS (BIO-001)
 [83/179858] Submitted process > CONTRACT_GATE_SAMPLES (BIO-001)
 [dd/a7c3f0] Submitted process > RUN_DATA_QUALITY (BIO-001)
@@ -297,7 +354,8 @@ nextflow run pipelines/nextflow/main.nf
 [a6/c058ef] Submitted process > EVALUATE_GOVERNANCE (BIO-001)
 ```
 
-`results/BIO-001/` then holds `curated/{samples,compounds,expression}.csv`, the
+`results/BIO-001/` then holds `curated/{samples,compounds,expression}.csv`,
+`metadata/governance-metadata.{txt,json}`, the
 `contracts/*.contract.{txt,json}` reports, `quality/dq-report.json`,
 `lineage/openlineage.jsonl` and `governance/governance-report.json`. Break the
 study and the gate stops it:
@@ -342,6 +400,7 @@ failed runs is deferred.
 | Parameter | Default |
 | --- | --- |
 | `--study_dir` | `data/raw/BIO-001` |
+| `--governance_dir` | `governance/studies` (reads `<STUDY>.yaml`) |
 | `--samples_contract` | `contracts/samples.v1.yaml` |
 | `--compounds_contract` | `contracts/compounds.v1.yaml` |
 | `--outdir` | `results` |
@@ -392,8 +451,18 @@ raw/expression  ──┘
 Nothing is inferred from the OpenLineage events' full input-output cross
 product; the events are read only for the run ID, which the summary prints.
 
+The study's validated classification goes with them. OpenMetadata's own word
+for a controlled, mutually exclusive tag vocabulary is a *Classification*, so
+the project's four values become four tags of one `bio_governance_classification`
+and every container carries `bio_governance_classification.internal`. Ownership
+is deliberately **not** sent: an OpenMetadata owner must be an existing user or
+team, addressed by a UUID the server assigned, and this project provisions no
+accounts. See [Governance metadata](docs/governance-metadata.md#openmetadata).
+
 Every write is a create-or-update `PUT`, so publishing twice updates the same
-seven containers and six edges rather than creating a second set.
+seven containers, four tags and six edges rather than creating a second set.
+Publication refuses — before its first request — a study whose governance
+declaration is missing or did not validate.
 
 | Variable | Default |
 | --- | --- |
@@ -435,6 +504,8 @@ DataPlatform  urn:li:dataPlatform:bio_governance_lab
 | --- | --- | --- |
 | the container | `StorageService` → `Container` | `DataPlatform` → `Dataset` |
 | the unit of a write | an entity, `PUT` whole | an **aspect**, proposed |
+| classification | a tag of a mutually exclusive Classification | a glossary term |
+| ownership | not sent (owners must already exist) | `ownership` aspect, owner and steward |
 | the address | FQN, assigned by the server | URN, derived by the client |
 | our identity lives in | `fullPath` | `qualifiedName` and a custom property |
 | lineage | one `PUT` per edge, in entity IDs | one aspect per downstream dataset |
@@ -445,6 +516,15 @@ catalogue's address is that catalogue's. `bio://BIO-001/raw/samples` derives
 `urn:li:dataset:(urn:li:dataPlatform:bio_governance_lab,BIO-001.raw.samples,PROD)`,
 and the canonical URI comes back unchanged in `qualifiedName` and in a
 `canonical_asset_id` property.
+
+The same declaration is projected DataHub's way: the classification as a
+**glossary term** (DataHub's controlled vocabulary for governance, where its
+tags are informal labels) and the owner and steward in an `ownership` aspect as
+`BUSINESS_OWNER` and `DATA_STEWARD`. The owners are corpuser URNs DataHub has no
+account for, which it accepts because the client derives them — the same
+property that let lineage name an upstream before it existed. The two
+catalogues hold different amounts of the same evidence, and the declaration
+stays canonical either way.
 
 Six edges arrive as four aspects, because DataHub's `upstreamLineage` aspect is
 the whole upstream list of one dataset rather than one edge — so the quality
@@ -489,10 +569,12 @@ PASS  compounds_contract
 PASS  data_quality
 PASS  curated_outputs
 PASS  lineage_evidence
+PASS  ownership
+PASS  classification
 ```
 
-Five checks, read from the pipeline's own output and nothing else — no clock, no
-network, no catalogue, no model:
+Seven checks, read from the pipeline's own output and nothing else — no clock,
+no network, no catalogue, no model:
 
 | Check | Reads | PASS when |
 | --- | --- | --- |
@@ -501,6 +583,8 @@ network, no catalogue, no model:
 | `data_quality` | `quality/dq-report.json` | the quality report's overall status is PASS |
 | `curated_outputs` | `curated/` | all three curated CSVs exist |
 | `lineage_evidence` | `lineage/openlineage.jsonl` | one START and one COMPLETE share a run ID, name the `curate-study` job, and name this study's raw inputs and curated outputs |
+| `ownership` | `metadata/governance-metadata.json` | the declaration was judged against this study and its owner, steward and contact are valid |
+| `classification` | `metadata/governance-metadata.json` | the declaration was judged against this study and its classification is one of the four values |
 
 The decision is *derived* from those checks, worst-first — any `FAIL` gives
 `BLOCKED`, otherwise any `WARN` gives `REVIEW`, otherwise `READY`:
@@ -535,10 +619,14 @@ uv run bio-gov governance evaluate results/BIO-001 \
   --json-out results/BIO-001/governance/governance-report.json
 ```
 
+A missing or invalid declaration fails `ownership`, `classification` or both,
+so the study is `BLOCKED` however clean its data is. Neither check asks what a
+classification permits: a `restricted` study is as `READY` as a `public` one.
+
 There is no numeric governance score, no policy engine, no rule language and no
-approval workflow. Ownership, classification, retention, access control and
-catalogue presence are deliberately absent: this project has no evidence for
-them yet, and a check that reads nothing always passes.
+approval workflow. Retention, access control and catalogue presence are
+deliberately absent: this project has no evidence for them yet, and a check
+that reads nothing always passes.
 
 See [Governance evaluation](docs/governance-evaluation.md).
 
@@ -571,7 +659,7 @@ to the results root:
 | Tool | Returns |
 | --- | --- |
 | `list_studies` | Every governed study under the results root, with its decision |
-| `get_governance_report` | The `GovernanceReport`: the decision and its five checks |
+| `get_governance_report` | The `GovernanceReport`: the decision and its seven checks |
 | `get_quality_report` | The `QualityReport`: six checks and an overall status |
 | `get_contract_results` | Both `ContractValidationResult`s, samples and compounds |
 | `get_lineage_summary` | The curation run's identity and its `bio://` datasets |
@@ -684,6 +772,9 @@ Nextflow checks its behaviour.
 - [Governance model](docs/governance-model.md) — what the domain model means.
 - [Synthetic data](docs/synthetic-data.md) — the generated study, determinism
   and bad-data injection.
+- [Governance metadata](docs/governance-metadata.md) — the per-study
+  declaration, what counts as valid evidence, the first gate, the two checks,
+  and how OpenMetadata and DataHub each represent it.
 - [Data contracts](docs/data-contracts.md) — the YAML format, the two contracts,
   validation and exit codes.
 - [Data quality](docs/data-quality.md) — contracts versus quality, the six
@@ -699,7 +790,7 @@ Nextflow checks its behaviour.
   identifier, why six edges are four aspects in one and six requests in the
   other, and what this small experiment does *not* establish.
 - [Governance evaluation](docs/governance-evaluation.md) — why code decides and
-  AI only explains, READY/REVIEW/BLOCKED, the five checks and the exit codes.
+  AI only explains, READY/REVIEW/BLOCKED, the seven checks and the exit codes.
 - [The MCP server](docs/mcp-server.md) — the read-only boundary, the six tools
   and two resources, stdio, the Inspector and results-root confinement.
 - [Local OpenMetadata](infra/openmetadata/README.md) — starting and stopping the
@@ -726,11 +817,14 @@ experimental lineage feature is deliberately not mixed in — the provenance her
 is orchestrator-agnostic on purpose.
 
 Catalogue publication is two local integrations and an explicit command each.
-The pipeline calls neither, and runs to a verdict with both switched off. No
-OpenMetadata `Pipeline`, glossary, tag or custom-property entities are created;
-no DataHub domains, glossary terms, owners, tags, assertions, data products,
-structured properties or forms are either, and there is no ingestion recipe,
-Kafka emitter or scheduled crawl. Nothing polls or reconciles.
+The pipeline calls neither, and runs to a verdict with both switched off. The
+only governance entities either catalogue receives are the classification
+vocabulary and, in DataHub, the owner and steward. No OpenMetadata `Pipeline`,
+glossary, tier, owner, user, team or custom-property entities are created; no
+DataHub domains, tags, users, groups, assertions, data products, structured
+properties or forms are either, and there is no ingestion recipe, Kafka emitter
+or scheduled crawl. Nothing polls or reconciles, and a reclassification is not
+`PATCH`ed into OpenMetadata.
 
 There is still no catalogue abstraction layer, and after writing the comparison
 there is a better reason than before. An interface over the two would have to
@@ -746,11 +840,13 @@ synthetic assets, and says explicitly that it establishes nothing about scale,
 search quality, reliability, adoption, managed cloud, ingestion performance,
 authorization or cost of ownership.
 
-Governance evaluation is five checks and a closed enum, not a policy engine.
+Governance evaluation is seven checks and a closed enum, not a policy engine.
 There is no Rego, no YAML policy language, no numeric score, no approval
-workflow and no stored history of decisions. Ownership, classification,
-retention, access control and catalogue availability become governance checks
-when this project has real evidence for them, and not before.
+workflow and no stored history of decisions. Ownership and classification
+became checks in milestone 12, when a committed declaration gave them evidence;
+retention, access control and catalogue availability become checks when this
+project has real evidence for them, and not before. Nothing decides what a
+classification permits, and there is no directory of people, teams or roles.
 
 The MCP server is read-only and local. There is no HTTP or SSE transport, no
 authentication, no OAuth and no container; there are no prompts, and no

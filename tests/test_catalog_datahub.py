@@ -22,15 +22,21 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from datahub.emitter.mce_builder import make_dataset_urn
+from datahub.emitter.mce_builder import make_dataset_urn, make_term_urn, make_user_urn
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.metadata.schema_classes import (
     DataPlatformInfoClass,
     DatasetPropertiesClass,
+    GlossaryNodeInfoClass,
+    GlossaryTermInfoClass,
+    GlossaryTermsClass,
+    OwnershipClass,
+    OwnershipTypeClass,
     SchemaMetadataClass,
     SubTypesClass,
     UpstreamLineageClass,
 )
+from datahub.sdk._utils import DEFAULT_ACTOR_URN
 from typer.testing import CliRunner
 
 from bio_governance.catalog import (
@@ -39,6 +45,8 @@ from bio_governance.catalog import (
     DATAHUB_GMS_VAR,
     DATAHUB_TOKEN_VAR,
     ENVIRONMENT,
+    GLOSSARY_NODE_URN,
+    OWNERSHIP_TYPES,
     PLATFORM_NAME,
     PLATFORM_URN,
     CatalogError,
@@ -50,12 +58,15 @@ from bio_governance.catalog import (
     prepare_assets,
     study_identifiers,
     study_urns,
+    term_urn,
     upstreams,
 )
-from bio_governance.catalog.datahub_client import DataHubClient
+from bio_governance.catalog.datahub_client import DataHubClient, owner_urns
+from bio_governance.catalog.datahub_mapping import TERMS_ACTOR, TERMS_TIME
 from bio_governance.catalog.datahub_publish import publish_study_to_datahub
 from bio_governance.cli import app
-from bio_governance.models import AssetIdentifier
+from bio_governance.models import AssetIdentifier, Classification, Ownership
+from conftest import REFUSALS, damage_governance_evidence
 
 runner = CliRunner()
 
@@ -380,8 +391,132 @@ def test_publishing_twice_is_idempotent(
     assert first.assets == second.assets
     assert first.edges == second.edges
     assert second_emitter.signature == first_signature
+    # Not only the same URNs and aspect types: the same aspects. Nothing in a
+    # proposal — not even the glossary terms' audit stamp — reads a clock.
+    assert [p.aspect for p in second_emitter.proposals] == [p.aspect for p in emitter.proposals]
     assert {change for _, _, change in first_signature} == {"UPSERT"}
-    assert len({urn for urn, _, _ in first_signature}) == 8  # the platform and seven datasets
+    # The platform, seven datasets, the glossary node and its four terms.
+    assert len({urn for urn, _, _ in first_signature}) == 13
+    # 1 platform + 5 glossary + 7 x (properties, subtype, ownership, terms) + 4 schema + 4 lineage.
+    assert len(first_signature) == 42
+
+
+# --------------------------------------------------------------------------
+# Governance metadata: a glossary term and an ownership aspect
+# --------------------------------------------------------------------------
+
+
+def test_the_urn_conventions_for_terms_and_owners_are_the_sdk_s_own() -> None:
+    for value in Classification:
+        assert term_urn(value) == make_term_urn(f"bio_governance_classification.{value.value}")
+    # The terms are stamped the way DataHub's own SDK stamps them.
+    assert TERMS_ACTOR == DEFAULT_ACTOR_URN
+    assert TERMS_TIME == 0
+
+
+def test_the_classification_vocabulary_is_a_glossary_node_and_four_terms(
+    study_files: tuple[Path, Path], emitter: RecordingEmitter
+) -> None:
+    raw, results = study_files
+
+    with DataHubClient(DataHubConfig(), emitter=emitter) as client:
+        publish_study_to_datahub(client, raw, results)
+
+    assert set(emitter.aspects(GlossaryNodeInfoClass)) == {GLOSSARY_NODE_URN}
+    terms = emitter.aspects(GlossaryTermInfoClass)
+    assert set(terms) == {term_urn(value) for value in Classification}
+    for value in Classification:
+        assert terms[term_urn(value)].name == value.value
+        assert terms[term_urn(value)].parentNode == GLOSSARY_NODE_URN
+
+
+def test_every_dataset_carries_the_declared_classification_as_a_glossary_term(
+    study_files: tuple[Path, Path], emitter: RecordingEmitter
+) -> None:
+    raw, results = study_files
+
+    with DataHubClient(DataHubConfig(), emitter=emitter) as client:
+        publish_study_to_datahub(client, raw, results)
+
+    applied = emitter.aspects(GlossaryTermsClass)
+    assert set(applied) == set(study_urns("BIO-001"))
+    for aspect in applied.values():
+        assert [term.urn for term in aspect.terms] == [
+            "urn:li:glossaryTerm:bio_governance_classification.internal"
+        ]
+        assert aspect.auditStamp.time == 0
+
+
+def test_every_dataset_names_the_owner_and_the_data_steward(
+    study_files: tuple[Path, Path], emitter: RecordingEmitter
+) -> None:
+    """DataHub has a steward role of its own, and both people are URNs it derives."""
+    raw, results = study_files
+
+    with DataHubClient(DataHubConfig(), emitter=emitter) as client:
+        publish_study_to_datahub(client, raw, results)
+
+    ownership = emitter.aspects(OwnershipClass)
+    assert set(ownership) == set(study_urns("BIO-001"))
+    for aspect in ownership.values():
+        assert [(owner.owner, owner.type) for owner in aspect.owners] == [
+            (make_user_urn("Avery Example"), OwnershipTypeClass.BUSINESS_OWNER),
+            (make_user_urn("Jordan Example"), OwnershipTypeClass.DATA_STEWARD),
+        ]
+
+
+def test_the_ownership_types_are_datahub_s_own_constants() -> None:
+    assert dict(OWNERSHIP_TYPES) == {
+        "owner": OwnershipTypeClass.BUSINESS_OWNER,
+        "steward": OwnershipTypeClass.DATA_STEWARD,
+    }
+
+
+def test_an_owner_name_is_encoded_by_the_sdk_not_pasted_into_a_urn() -> None:
+    """A name with a URN-reserved character still yields a URN DataHub can parse."""
+    ownership = Ownership(
+        owner="Example, Avery (Oncology)", steward="Jordan Example", contact="x@example.org"
+    )
+
+    (owner, kind), _ = owner_urns(ownership)
+
+    assert owner == make_user_urn("Example, Avery (Oncology)")
+    assert "," not in owner.removeprefix("urn:li:corpuser:")
+    assert kind == "BUSINESS_OWNER"
+
+
+def test_the_contact_address_is_not_projected(
+    study_files: tuple[Path, Path], emitter: RecordingEmitter
+) -> None:
+    """An address belongs to a user's profile, and this project creates no users."""
+    raw, results = study_files
+
+    with DataHubClient(DataHubConfig(), emitter=emitter) as client:
+        publish_study_to_datahub(client, raw, results)
+
+    assert all("example.org" not in repr(proposal.aspect) for proposal in emitter.proposals)
+
+
+@pytest.mark.parametrize(("damage", "message"), REFUSALS, ids=[d for d, _ in REFUSALS])
+def test_publication_refuses_governance_metadata_it_cannot_rely_on(
+    study_files: tuple[Path, Path],
+    emitter: RecordingEmitter,
+    tmp_path: Path,
+    damage: str,
+    message: str,
+) -> None:
+    """The same three refusals as OpenMetadata, from the same helper, before any proposal."""
+    raw, results = study_files
+    damage_governance_evidence(raw, results, tmp_path, damage)
+
+    with (
+        DataHubClient(DataHubConfig(), emitter=emitter) as client,
+        pytest.raises(CatalogError) as error,
+    ):
+        publish_study_to_datahub(client, raw, results)
+
+    assert message in str(error.value)
+    assert emitter.proposals == []
 
 
 def test_a_missing_curated_file_stops_publication_before_any_proposal(
@@ -544,6 +679,8 @@ def test_cli_publish_prints_seven_assets_and_six_edges(
     assert "6 lineage edges" in result.output
     assert f"Platform: {PLATFORM_URN}" in result.output
     assert RAW[0] in result.output
+    assert "Classification: internal -> urn:li:glossaryTerm:" in result.output
+    assert "urn:li:corpuser:Jordan Example (DATA_STEWARD)" in result.output
 
 
 def test_cli_get_resolves_the_seven_assets_and_the_six_edges(
@@ -563,6 +700,11 @@ def test_cli_get_resolves_the_seven_assets_and_the_six_edges(
         assert identifier.uri in result.output
     assert f"{urn_of(RAW[0])} -> {urn_of(CURATED[0])}" in result.output
     assert f"{urn_of(RAW[1])} -> {urn_of(REPORT)}" in result.output
+    assert (
+        result.output.count("terms:  urn:li:glossaryTerm:bio_governance_classification.internal")
+        == 7
+    )
+    assert "urn:li:corpuser:Avery Example (BUSINESS_OWNER)" in result.output
 
 
 def test_cli_get_exits_2_when_a_study_was_never_published(

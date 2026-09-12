@@ -23,6 +23,9 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from bio_governance.governance import GovernanceMetadata
+from bio_governance.models import Classification, Ownership
+
 #: Where a local Docker quickstart answers. The path is included because every
 #: OpenMetadata route lives under ``/api``; the client appends ``/v1/...``.
 DEFAULT_HOST = "http://localhost:8585/api"
@@ -117,6 +120,12 @@ class CatalogAsset(BaseModel):
     ``identifier`` in the same one-way fashion and ignores ``name``, because two
     catalogues with different naming rules must not be made to share one
     derivation.
+
+    ``classification`` and ``ownership`` come from the study's validated
+    governance declaration and are the same for all seven assets: the
+    declaration is about the study, and both catalogues attach governance
+    metadata to each entity rather than to a study. Each catalogue projects as
+    much of them as its model can honestly hold, which is not the same amount.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -128,6 +137,8 @@ class CatalogAsset(BaseModel):
     file_format: FileFormat
     columns: tuple[CatalogColumn, ...] = ()
     size_bytes: int | None = None
+    classification: Classification | None = None
+    ownership: Ownership | None = None
 
 
 class LineageEdge(BaseModel):
@@ -143,7 +154,11 @@ class LineageEdge(BaseModel):
 
 
 class PublishedCatalog(BaseModel):
-    """What one publication did, for the CLI to print and the tests to assert on."""
+    """What one publication did, for the CLI to print and the tests to assert on.
+
+    ``governance`` is the validated declaration the publication projected. It
+    is the canonical record; what either catalogue now holds is derived from it.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -151,6 +166,7 @@ class PublishedCatalog(BaseModel):
     service: str = Field(min_length=1)
     assets: tuple[CatalogAsset, ...] = Field(min_length=1)
     edges: tuple[LineageEdge, ...] = Field(min_length=1)
+    governance: GovernanceMetadata
     lineage_run_id: str | None = None
 
 

@@ -71,14 +71,14 @@ whether they may use the data. Three words do.
 
 `REVIEW` exists so that a finding worth recording does not have to choose
 between blocking a pipeline and saying nothing at all. Today only the quality
-layer can produce one, by warning; the other four checks are pass-or-fail
+layer can produce one, by warning; the other six checks are pass-or-fail
 because a missing curated file or an incoherent lineage record is not a matter
 of degree.
 
-## The five checks
+## The seven checks
 
 Each check reads one piece of evidence the pipeline published under
-`results/<STUDY>/`.
+`results/<STUDY>/`. The last two read the same one.
 
 | Check | Reads | PASS when |
 | --- | --- | --- |
@@ -87,6 +87,8 @@ Each check reads one piece of evidence the pipeline published under
 | `data_quality` | `quality/dq-report.json` | the quality report's overall status is PASS |
 | `curated_outputs` | `curated/` | all three curated CSVs exist |
 | `lineage_evidence` | `lineage/openlineage.jsonl` | the events describe one coherent curation run |
+| `ownership` | `metadata/governance-metadata.json` | the study's declaration was judged against this study, and its owner, steward and contact are valid |
+| `classification` | `metadata/governance-metadata.json` | the study's declaration was judged against this study, and its classification is one of the four values |
 
 **The contract checks** deserialize the evidence back into the very
 `ContractValidationResult` the validator produced and read its `passed`
@@ -114,10 +116,20 @@ Two events from different runs, or provenance that names another study, describe
 something other than this curation, and a governance layer that accepted them
 would be certifying a file it cannot actually trace.
 
-Not implemented, deliberately: ownership, classification, retention, access
-control and catalogue availability. Each would be a real governance rule, and
-this project has no evidence for any of them yet. A check that reads nothing is
-a check that always passes, which is worse than an absent one.
+**The ownership and classification checks** (milestone 12) deserialize the
+`MetadataValidationResult` the governance metadata gate wrote. Evidence that is
+missing, unreadable, or judged against another study fails both — neither claim
+is evidenced. Past that, each fails only for problems with its own part of the
+declaration or with the declaration as a whole, so a wrong classification leaves
+a valid ownership passing and the report says which claim is unsupported.
+Neither check asks what a classification *permits*; a `restricted` study passes
+exactly as a `public` one does. See [governance-metadata.md](governance-metadata.md).
+
+Not implemented, deliberately: retention, access control and catalogue
+availability. Each would be a real governance rule, and this project has no
+evidence for any of them yet. A check that reads nothing is a check that always
+passes, which is worse than an absent one — which is why ownership and
+classification waited for a declaration before they became checks.
 
 ## The CLI
 
@@ -134,6 +146,8 @@ PASS  compounds_contract
 PASS  data_quality
 PASS  curated_outputs
 PASS  lineage_evidence
+PASS  ownership
+PASS  classification
 ```
 
 Delete the provenance and the verdict changes:
@@ -147,6 +161,24 @@ PASS  compounds_contract
 PASS  data_quality
 PASS  curated_outputs
 FAIL  lineage_evidence    lineage evidence is missing: results/BIO-001/lineage/openlineage.jsonl
+PASS  ownership
+PASS  classification
+```
+
+Remove the study's governance metadata evidence instead, and both of the claims
+it carried become unsupported:
+
+```
+Study: BIO-001
+Decision: BLOCKED
+
+PASS  samples_contract
+PASS  compounds_contract
+PASS  data_quality
+PASS  curated_outputs
+PASS  lineage_evidence
+FAIL  ownership           governance metadata evidence is missing: results/BIO-001/metadata/governance-metadata.json
+FAIL  classification      governance metadata evidence is missing: results/BIO-001/metadata/governance-metadata.json
 ```
 
 Turn one quality finding into a warning and it asks for a person instead:
@@ -160,6 +192,8 @@ PASS  compounds_contract
 WARN  data_quality        data quality WARN: compound_coverage
 PASS  curated_outputs
 PASS  lineage_evidence
+PASS  ownership
+PASS  classification
 ```
 
 `--json-out` writes the structured report, decision included:
@@ -262,8 +296,9 @@ and it says `BLOCKED`.
 No policy engine, no rule language, no Rego, no YAML-defined policies. The check
 vocabulary is a closed enum, exactly like the contract rules and the quality
 checks, because every finding has to be a named identifier something downstream
-can act on. Five checks do not need an engine, and building one before the sixth
-check exists would be guessing at what it needs.
+can act on. Seven checks do not need an engine: milestone 12 added two as two
+enum members and two functions, and building an engine before a check exists
+that needs one would be guessing at what it needs.
 
 No approval workflow, no sign-off, no history and no stored decisions. A report
 describes one evaluation of one results directory.

@@ -119,7 +119,7 @@ def build_server(results_root: Path = DEFAULT_RESULTS_ROOT) -> MCPServer[None]:
 
     @server.tool(annotations=READ_ONLY)
     def get_governance_report(study_id: str) -> GovernanceReport:
-        """Return the study's governance report: the decision and the five checks behind it.
+        """Return the study's governance report: the decision and the seven checks behind it.
 
         The decision is derived from the checks by the governance layer itself.
         Report it; do not recompute it, and do not disagree with it.
@@ -164,7 +164,7 @@ def build_server(results_root: Path = DEFAULT_RESULTS_ROOT) -> MCPServer[None]:
         "governance://studies/{study_id}/report",
         name="governance-report",
         title="Governance report",
-        description="The READY/REVIEW/BLOCKED decision for one study, and its five checks.",
+        description="The READY/REVIEW/BLOCKED decision for one study, and its seven checks.",
         mime_type="application/json",
     )
     def governance_resource(study_id: str) -> str:

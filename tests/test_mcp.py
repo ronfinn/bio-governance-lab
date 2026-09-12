@@ -154,7 +154,7 @@ async def test_list_studies_discovers_the_governed_study(governed: Path) -> None
         {
             "study_id": "BIO-001",
             "decision": "ready",
-            "detail": "5 of 5 governance checks passed",
+            "detail": "7 of 7 governance checks passed",
         }
     ]
 
@@ -195,6 +195,8 @@ async def test_get_governance_report_returns_ready_for_a_clean_run(governed: Pat
         "data_quality",
         "curated_outputs",
         "lineage_evidence",
+        "ownership",
+        "classification",
     ]
 
 
@@ -273,7 +275,7 @@ async def test_why_not_ready_reports_no_blockers_for_a_ready_study(governed: Pat
     assert explanation["decision"] == "ready"
     assert explanation["blocking"] == []
     assert explanation["review"] == []
-    assert "all 5 governance checks passed" in explanation["summary"]
+    assert "all 7 governance checks passed" in explanation["summary"]
 
 
 async def test_why_not_ready_returns_the_failed_checks_for_a_blocked_study(

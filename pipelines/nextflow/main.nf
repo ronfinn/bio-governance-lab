@@ -3,15 +3,23 @@
 /*
  * bio-governance-lab — governance-gated curation pipeline.
  *
- * Raw synthetic study -> contract gates -> data-quality gate -> curated output
- * -> OpenLineage provenance evidence -> governance decision.
+ * Raw synthetic study -> governance metadata gate -> contract gates ->
+ * data-quality gate -> curated output -> OpenLineage provenance evidence ->
+ * governance decision.
  *
  * The gates are the point of this pipeline. CURATE has no input that does not
  * come through RUN_DATA_QUALITY, which runs only after CONTRACT_GATE_SAMPLES,
- * which runs only after CONTRACT_GATE_COMPOUNDS. So a study that breaks a
- * contract or fails a quality check cannot reach the curated directory: the
- * `bio-gov` command exits non-zero, Nextflow terminates the run, and nothing
- * downstream is published.
+ * which runs only after CONTRACT_GATE_COMPOUNDS, which runs only after
+ * GOVERNANCE_METADATA_GATE. So a study with no valid owner and classification,
+ * or that breaks a contract or fails a quality check, cannot reach the curated
+ * directory: the `bio-gov` command exits non-zero, Nextflow terminates the run,
+ * and nothing downstream is published.
+ *
+ * The governance metadata gate is first because it is about the study rather
+ * than its files. Classification is what decides how data may be handled, and
+ * an owner is who answers for it, so neither can be an afterthought to
+ * processing: a study nobody has declared responsibility for is not copied
+ * anywhere, however well-formed its files are.
  *
  * The two gates ask different questions. A contract asks whether one file
  * conforms to its declared structure; data quality asks whether the study as a
@@ -24,12 +32,36 @@
  * failed runs is a later milestone.
  *
  * EVALUATE_GOVERNANCE is last, and consumes every other process's output. It
- * re-reads the evidence the run produced — the two contract results, the
- * quality report, the curated files and the lineage events — and derives one
- * decision from it. Deterministic code decides; nothing here asks a model.
+ * re-reads the evidence the run produced — the governance metadata result, the
+ * two contract results, the quality report, the curated files and the lineage
+ * events — and derives one decision from it. Deterministic code decides;
+ * nothing here asks a model.
  */
 
 nextflow.enable.dsl = 2
+
+process GOVERNANCE_METADATA_GATE {
+    tag "${study}"
+    publishDir "${params.outdir}/${study}/metadata", mode: 'copy'
+
+    input:
+    tuple val(study), path(raw), path(declaration)
+
+    output:
+    tuple val(study), path('governance-metadata.txt'), path('governance-metadata.json')
+
+    script:
+    // The raw directory is staged under its own name, so the study the
+    // declaration must describe is read from the data rather than passed in.
+    // The .json is the MetadataValidationResult EVALUATE_GOVERNANCE reads back;
+    // a missing declaration fails here, as an unreadable input (exit 2).
+    """
+    set -o pipefail
+    echo "GOVERNANCE METADATA GATE: ${declaration} for ${study}"
+    ${params.bio_gov} governance metadata validate ${declaration} --study-dir ${raw} \\
+        --json-out governance-metadata.json | tee governance-metadata.txt
+    """
+}
 
 process CONTRACT_GATE_COMPOUNDS {
     tag "${study}"
@@ -145,7 +177,7 @@ process EVALUATE_GOVERNANCE {
 
     input:
     tuple val(study), path(samples_result), path(compounds_result), path(dq_report),
-          path(curated), path(lineage)
+          path(curated), path(lineage), path(metadata_result)
 
     output:
     tuple val(study), path('governance')
@@ -157,12 +189,13 @@ process EVALUATE_GOVERNANCE {
     // the published results directory uses.
     """
     echo "GOVERNANCE: ${study}"
-    mkdir -p ${study}/contracts ${study}/quality
+    mkdir -p ${study}/contracts ${study}/quality ${study}/metadata
     cp ${samples_result}   ${study}/contracts/samples.contract.json
     cp ${compounds_result} ${study}/contracts/compounds.contract.json
     cp ${dq_report}        ${study}/quality/dq-report.json
     cp -RL ${curated}      ${study}/curated
     cp -RL ${lineage}      ${study}/lineage
+    cp ${metadata_result}  ${study}/metadata/governance-metadata.json
     ${params.bio_gov} governance evaluate ${study} \\
         --json-out governance/governance-report.json
     """
@@ -180,12 +213,22 @@ workflow {
     def samples_contract   = file(params.samples_contract,   checkIfExists: true)
     def compounds_contract = file(params.compounds_contract, checkIfExists: true)
 
+    // Not checkIfExists: a study without a declaration is a governance finding,
+    // and it is reported by the gate that owns the question rather than by
+    // Nextflow refusing to start.
+    def declaration = file("${params.governance_dir}/${study}.yaml")
+
     log.info "study      : ${study} (${study_dir})"
+    log.info "governance : ${declaration}"
     log.info "contracts  : ${compounds_contract.name}, ${samples_contract.name}"
     log.info "outdir     : ${params.outdir}"
 
+    def metadata_passed = GOVERNANCE_METADATA_GATE(
+        Channel.of(tuple(study, study_dir, declaration))
+    )
+
     def compounds_passed = CONTRACT_GATE_COMPOUNDS(
-        Channel.of(tuple(study, compounds, compounds_contract))
+        metadata_passed.map { s, _txt, _json -> tuple(s, compounds, compounds_contract) }
     )
 
     def samples_passed = CONTRACT_GATE_SAMPLES(
@@ -213,8 +256,10 @@ workflow {
             .join(quality_passed)
             .join(curated)
             .join(lineage)
-            .map { s, _s_txt, s_json, _c_txt, c_json, report, curated_dir, lineage_dir ->
-                tuple(s, s_json, c_json, report, curated_dir, lineage_dir)
+            .join(metadata_passed)
+            .map { s, _s_txt, s_json, _c_txt, c_json, report, curated_dir, lineage_dir,
+                   _m_txt, m_json ->
+                tuple(s, s_json, c_json, report, curated_dir, lineage_dir, m_json)
             }
     )
 }
