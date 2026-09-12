@@ -6,8 +6,9 @@ packages for five kinds of request, and the REST API it wraps is documented and
 stable. The decision goes the other way here, and for reasons worth writing
 down rather than for consistency's sake:
 
-* ``acryl-datahub`` resolves to about 60 packages, none of them a dbt or a
+* ``acryl-datahub`` resolves to 65 packages, none of them a dbt or a
   Kubernetes client, and it installs cleanly on this project's Python 3.14.
+  ``openmetadata-ingestion`` resolves to 135.
 * DataHub's write model is not a REST entity model. A write is a **Metadata
   Change Proposal** — an aspect, a change type and an entity URN — and the
   aspects are code-generated Avro-backed classes. Hand-rolling that JSON would
@@ -27,7 +28,8 @@ bookkeeping this module does.
 
 The SDK is imported at this module's top level and this module is imported
 lazily by its callers, for the reason the CLI already imports the MCP SDK
-lazily: the metadata model costs about half a second to import, and the six
+lazily: the metadata model costs about 80ms to import — a third of this CLI's
+whole startup — and the six
 ``bio-gov`` commands the pipeline shells out to on every run must not pay it.
 
 The token, where a deployment requires one, is never logged, echoed, or

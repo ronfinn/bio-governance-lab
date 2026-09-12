@@ -4,7 +4,7 @@ Two of them: OpenMetadata and DataHub, side by side and neither behind an
 interface. What is exported here is everything either publication needs that
 does not cost anything to import. ``DataHubClient`` and
 ``publish_study_to_datahub`` are deliberately *not* exported: they pull in the
-DataHub SDK's metadata model, which costs about half a second, and every
+DataHub SDK's metadata model, which costs about 80ms to import, and every
 ``bio-gov`` command — including the six the pipeline shells out to on every run
 — would pay it for nothing. Their callers import them by module, the way the
 CLI already imports the MCP server.

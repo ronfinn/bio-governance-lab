@@ -139,14 +139,14 @@ find the JSONL corresponding to what the catalogue now holds.
 ## The SDK, and why here but not there
 
 The OpenMetadata client in this package deliberately does **not** use that
-project's SDK. `openmetadata-ingestion` resolves to around 130 transitive
-packages — dbt-core, boto3, grpcio, the Kubernetes client — for five kinds of
-request against four documented REST endpoints. The decision goes the other way
-for DataHub, and the reasoning is worth keeping:
+project's SDK. `openmetadata-ingestion` resolves to 135 packages — dbt-core,
+boto3, grpcio, the Kubernetes client — for five kinds of request against four
+documented REST endpoints. The decision goes the other way for DataHub, and the
+reasoning is worth keeping:
 
 | | acryl-datahub | openmetadata-ingestion |
 | --- | --- | --- |
-| transitive packages | ~60 | ~130 |
+| packages a fresh resolve installs | 65 | 135 |
 | what it wraps | an aspect model generated from Avro schemas | a REST entity API |
 | Python 3.14 | installs and runs clean | not attempted here |
 | what hand-rolling costs | re-deriving a generated schema | building four JSON bodies |
@@ -172,7 +172,7 @@ Two practical notes from doing it:
   handled with `untyped_calls_exclude = ["datahub"]` in `pyproject.toml` — a
   narrowing of one flag to one package, rather than a `type: ignore` in `src`.
 
-The SDK costs about half a second to import, so `datahub_client.py` and
+The SDK costs about 80ms to import, so `datahub_client.py` and
 `datahub_publish.py` are imported *lazily*, inside the CLI commands that need
 them, and are not re-exported from `bio_governance.catalog`. The six `bio-gov`
 commands the Nextflow pipeline shells out to on every run must not pay for a

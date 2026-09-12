@@ -41,8 +41,7 @@ and they are computed here.
 
 Nothing in this module performs IO, speaks HTTP, or imports the DataHub SDK.
 Keeping the SDK out of it is what lets the CLI read a configuration and derive a
-URN without paying half a second to import a metadata model it is not going to
-send.
+URN without importing a metadata model it is not going to send.
 """
 
 from __future__ import annotations

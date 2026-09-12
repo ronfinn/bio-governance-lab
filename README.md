@@ -6,15 +6,17 @@ This repository is a public portfolio project exploring how data governance —
 ownership, classification, lineage, contracts and quality — can be expressed as
 typed, tested, version-controlled code rather than as documents in a wiki.
 
-> **Status: milestone 10 — DataHub catalogue integration.** This repository
-> contains the core domain model, a deterministic generator for a small
-> synthetic study, YAML data contracts over the generated CSVs, study-level
-> data-quality checks, a Nextflow pipeline that puts both in front of curation
-> as gates, OpenLineage events recording what a governed run produced,
-> publication of those governed assets into a local OpenMetadata instance and
-> into a local DataHub, one deterministic READY/REVIEW/BLOCKED decision derived
-> from all of that evidence, and a Model Context Protocol server that lets an AI
-> assistant read that decision without any way to change it. See
+> **Status: milestone 11 — OpenMetadata versus DataHub comparison.** This
+> repository contains the core domain model, a deterministic generator for a
+> small synthetic study, YAML data contracts over the generated CSVs,
+> study-level data-quality checks, a Nextflow pipeline that puts both in front
+> of curation as gates, OpenLineage events recording what a governed run
+> produced, publication of those governed assets into a local OpenMetadata
+> instance and into a local DataHub, one deterministic READY/REVIEW/BLOCKED
+> decision derived from all of that evidence, a Model Context Protocol server
+> that lets an AI assistant read that decision without any way to change it, and
+> a written [case study](docs/catalog-comparison.md) comparing what the two
+> catalogue integrations actually demonstrated. See
 > [Deferred work](#deferred-work).
 
 ## What is here today
@@ -42,6 +44,9 @@ typed, tested, version-controlled code rather than as documents in a wiki.
 - A read-only [MCP](https://modelcontextprotocol.io) server exposing that
   evidence to an AI assistant over stdio: six tools, two resources, and no way
   to write, recompute or override a decision.
+- A side-by-side [case study](docs/catalog-comparison.md) of the two catalogue
+  integrations: entity models, identity, write semantics, lineage shape,
+  idempotence, dependency cost — and what one synthetic study cannot prove.
 - A [Typer](https://typer.tiangolo.com/) CLI, `bio-gov`.
 - A full test suite, lint, format and type checks, wired into GitHub Actions.
 
@@ -689,6 +694,10 @@ Nextflow checks its behaviour.
   `bio://`-to-FQN mapping, authentication, idempotence and lineage.
 - [DataHub](docs/datahub.md) — datasets and aspects, the `bio://`-to-URN
   mapping, Metadata Change Proposals, the SDK decision and idempotence.
+- [Catalogue comparison](docs/catalog-comparison.md) — the two integrations side
+  by side: what each catalogue thinks a governed file is, who owns the
+  identifier, why six edges are four aspects in one and six requests in the
+  other, and what this small experiment does *not* establish.
 - [Governance evaluation](docs/governance-evaluation.md) — why code decides and
   AI only explains, READY/REVIEW/BLOCKED, the five checks and the exit codes.
 - [The MCP server](docs/mcp-server.md) — the read-only boundary, the six tools
@@ -700,10 +709,9 @@ Nextflow checks its behaviour.
 
 ## Deferred work
 
-Deliberately **not** implemented in this milestone: Marquez, a written
-comparison of the two catalogues, and AI-agent governance in the sense of an
-agent that *acts*. Each will land as its own milestone on top of this
-foundation. The pipeline is local-execution only —
+Deliberately **not** implemented in this milestone: Marquez, and AI-agent
+governance in the sense of an agent that *acts*. Each will land as its own
+milestone on top of this foundation. The pipeline is local-execution only —
 no Kubernetes, no cloud executor, no container registry.
 
 Data quality here is a single run's evidence and a gate that acts on it. There
@@ -724,11 +732,19 @@ no DataHub domains, glossary terms, owners, tags, assertions, data products,
 structured properties or forms are either, and there is no ingestion recipe,
 Kafka emitter or scheduled crawl. Nothing polls or reconciles.
 
-There is still no catalogue abstraction layer, now for a better reason than
-before: the second implementation exists and was deliberately left as a second
-implementation. An interface over the two would have to hide the entity model,
-the identity scheme and the lineage shape — which is what the next milestone is
-for comparing.
+There is still no catalogue abstraction layer, and after writing the comparison
+there is a better reason than before. An interface over the two would have to
+hide the entity model, the identity scheme, the write granularity and the
+lineage shape — and those differences are the entire content of
+[the case study](docs/catalog-comparison.md). A `CatalogAdapter` carrying
+`health()`, `publish()` and `get()` would abstract over the only three things
+the two implementations already have in common.
+
+The comparison is a case study of this repository, not a product evaluation: it
+measures entity models, identity, write semantics and dependency cost on seven
+synthetic assets, and says explicitly that it establishes nothing about scale,
+search quality, reliability, adoption, managed cloud, ingestion performance,
+authorization or cost of ownership.
 
 Governance evaluation is five checks and a closed enum, not a policy engine.
 There is no Rego, no YAML policy language, no numeric score, no approval

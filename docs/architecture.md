@@ -2,16 +2,17 @@
 
 ## Scope of this milestone
 
-This repository is at milestone 10: a tested Python foundation, a deterministic
+This repository is at milestone 11: a tested Python foundation, a deterministic
 generator for a small synthetic study, YAML data contracts validated against the
 generated CSVs, study-level data-quality checks over the study as a whole, a
 Nextflow pipeline that runs both as gates in front of curation, OpenLineage
 events recording what a successful run produced, publication of those governed
 assets into a local OpenMetadata instance *and* into a local DataHub, one
-deterministic READY/REVIEW/BLOCKED decision derived from all of that evidence,
-and a read-only Model Context Protocol server exposing that evidence to an AI
-client. No history is kept, either catalogue is contacted only by an explicit
-post-run command, and the MCP server reads local files and nothing else.
+deterministic READY/REVIEW/BLOCKED decision derived from all of that evidence, a
+read-only Model Context Protocol server exposing that evidence to an AI client,
+and a written comparison of the two catalogue integrations. No history
+is kept, either catalogue is contacted only by an explicit post-run command, and
+the MCP server reads local files and nothing else.
 
 Everything that follows is designed to be added *on top of* this model rather
 than to replace it.
@@ -483,19 +484,23 @@ the protocol surface. It is the same split the project makes everywhere between
 what something *is* and how it is transported, and it means the readers are
 testable without a client.
 
-**The MCP SDK is imported lazily by the CLI.** It costs about a second to
-import, and every other `bio-gov` command — including the six the pipeline
-shells out to on every run — would otherwise pay that for nothing. The DataHub
-SDK is imported lazily for the same reason, at about half a second.
+**The MCP SDK is imported lazily by the CLI.** Importing it adds about 290ms
+to a `bio-gov` process that starts in around 230ms, and every other command —
+including the six the pipeline shells out to on every run — would otherwise pay
+that for nothing. The DataHub SDK is imported lazily for the same reason, at
+about 80ms. Both figures are measured against this project's already-loaded
+dependencies, where Pydantic and Typer are paid for anyway; an SDK measured
+alone in an empty environment looks several times more expensive than it
+actually is here.
 
 **The SDK decision is made per catalogue, not once.** OpenMetadata is published
 to over REST because its SDK costs around 130 transitive packages to send four
 readable JSON bodies. DataHub is published to *through* its SDK because its
 write model is a Metadata Change Proposal carrying an Avro-generated aspect —
 hand-rolling that would mean maintaining a copy of a schema the SDK already
-holds — and `acryl-datahub` costs about 60 packages, none of them a dbt or a
-Kubernetes client. Two integrations, two answers, each argued from what that
-catalogue's API actually is.
+holds — and `acryl-datahub` resolves to 65 packages, none of them a dbt or a
+Kubernetes client, against 135 for `openmetadata-ingestion`. Two integrations,
+two answers, each argued from what that catalogue's API actually is.
 
 **Both catalogues, and still no catalogue interface.** Milestone 10 added the
 second implementation, which is exactly the point at which an abstraction is
@@ -503,10 +508,34 @@ usually extracted, and it was not. The two publications share what genuinely
 overlaps — the models, and the code that checks which files exist — and differ
 everywhere the catalogues differ: entity model, identity, aspects versus
 entities, one edge per request versus one aspect per downstream dataset. An
-interface over that would have to hide those differences, and comparing them is
-the next milestone's whole subject. It is easier to extract an interface from
-two working implementations later than to recover a difference an interface has
-already flattened.
+interface over that would have to hide those differences.
+
+Milestone 11 wrote the comparison down in
+[catalog-comparison.md](catalog-comparison.md), and it settled the question rather than reopening it. `health()`, `publish()`
+and `get()` turned out to be the *only* things the two implementations have in
+common: beneath them sit different entity models, opposite answers to who owns
+the primary key, different write granularity, and lineage semantics whose
+failure modes are not even the same kind (a missing edge in one, a silently
+truncated upstream list in the other). An interface is a claim that the
+differences below it do not matter to the caller, and here each one does. It is
+easier to extract an interface from two working implementations later than to
+recover a difference an interface has already flattened.
+
+**The governance layer keeps its own identity, and that is now tested rather
+than asserted.** Milestone 7 claimed a catalogue is a projection of governed
+state. Milestone 10 was the experiment: a second catalogue, with a different
+entity model, a different identifier scheme, a different write protocol and
+different lineage semantics, went in without a line changing in `contracts/`,
+`quality/`, `lineage/`, `governance/`, `mcp/` or `pipelines/`. The two
+catalogues imposed incompatible naming constraints on the same asset —
+`BIO-001_raw_samples` and `BIO-001.raw.samples`, both non-negotiable — so a
+project whose canonical identity had been either catalogue's would have had to
+translate into the other, and a rename in one deployment would have reached the
+governance record. Because `bio://` is the identity and both addresses are
+one-way derivations of it, each catalogue got a name it accepts and the
+governance record never moved. The same derivation is also what makes both
+publications idempotent, which turns out to be a property of the mapping rather
+than of `PUT` or `UPSERT`.
 
 ## Deliberate non-goals for now
 
@@ -517,10 +546,10 @@ sit side by side as concrete clients rather than as implementations of a
 
 ## Where this is heading
 
-Later milestones will compare the two catalogue integrations, and add AI-agent
-governance in the sense of an agent that *acts* rather than reads. Each of those is expected to consume the
-`Asset` model rather than define its own, and to run against the synthetic study
-— including the deliberately broken versions of it.
+Later milestones will add AI-agent governance in the sense of an agent that
+*acts* rather than reads. That is expected to consume the `Asset` model rather
+than define its own, and to run against the synthetic study — including the
+deliberately broken versions of it.
 
 If an assistant is ever to ask for something — a re-run, a review, a note
 against a study — it will be a request into a queue that a person or a

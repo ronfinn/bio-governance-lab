@@ -10,19 +10,20 @@ subject data ever belongs in this repository.
 
 ## Current milestone
 
-Milestone 10: domain models, CLI, tests, CI, deterministic synthetic study
+Milestone 11: domain models, CLI, tests, CI, deterministic synthetic study
 generation, YAML data contracts and contract validation, study-level
 data-quality checks, a Nextflow pipeline that gates curation on both,
 OpenLineage provenance events for a successful run, publication of the governed
 assets into a local OpenMetadata instance and into a local DataHub, one
 deterministic READY/REVIEW/BLOCKED governance decision derived from that
-evidence, and a read-only MCP server exposing that evidence to an AI client.
+evidence, a read-only MCP server exposing that evidence to an AI client, and
+`docs/catalog-comparison.md` — the written case study comparing the two
+catalogue integrations.
 
-**Not yet implemented, and not to be added without being asked:** Marquez, the
-written OpenMetadata-versus-DataHub comparison, AI-agent governance in the sense
-of an agent that acts. The pipeline is local-execution only: no
-Kubernetes, Seqera Platform, cloud executor, container registry or DSL2 module
-library. Data quality has no history, trends, drift detection, thresholds,
+**Not yet implemented, and not to be added without being asked:** Marquez,
+AI-agent governance in the sense of an agent that acts. The pipeline is
+local-execution only: no Kubernetes, Seqera Platform, cloud executor, container
+registry or DSL2 module library. Data quality has no history, trends, drift detection, thresholds,
 dashboard or database, and no numeric score. Lineage has no server, HTTP or
 Kafka transport, database, failed-run events or custom facets, and does not use
 Nextflow's own experimental lineage feature. The catalogue integration is one
@@ -34,9 +35,11 @@ integration is one local quickstart over its SDK: no ingestion source, recipe or
 scheduled crawl, no Kafka emitter, no domains, glossary terms, owners, tags,
 assertions, data products, structured properties or forms, no policies, soft
 deletes or stateful ingestion, no DataHub Cloud, and no pipeline wiring either.
-There is still no `CatalogAdapter`, `BaseCatalog` or plugin registry, and adding
-one is not a milestone-11 task: comparing the two implementations does not
-require putting them behind an interface. The MCP server is
+There is still no `CatalogAdapter`, `BaseCatalog` or plugin registry, and the
+comparison in `docs/catalog-comparison.md` is the argument against adding one:
+`health()`, `publish()` and `get()` are the only three things the two
+implementations share, and every difference beneath them is the content of the
+case study. The MCP server is
 read-only, local and stdio-only: no HTTP or SSE transport, no authentication,
 OAuth, reverse proxy or container, no prompts, no catalogue search, no
 `read_file` tool, and no tool that writes anything at all.
@@ -141,7 +144,8 @@ all four before committing.
   `lineage.md` (OpenLineage job, run, datasets and transport),
   `openmetadata.md` (containers, identity mapping, auth, idempotence, lineage),
   `datahub.md` (datasets and aspects, the URN mapping, the SDK decision,
-  idempotence),
+  idempotence), `catalog-comparison.md` (the two integrations side by side, and
+  the limits of the experiment),
   `governance-evaluation.md` (the decision model, the five checks, exit codes),
   `mcp-server.md` (the read-only boundary, the tools and resources, stdio,
   the Inspector, results-root confinement).
@@ -259,7 +263,8 @@ all four before committing.
   abbreviation for it collides with this project's Model Context Protocol
   server.
 - **The DataHub SDK is imported lazily**, like the MCP SDK and for the same
-  reason: it costs about half a second, and `datahub_client.py` and
+  reason: it costs about 80ms — a third of the CLI's startup — and
+  `datahub_client.py` and
   `datahub_publish.py` are therefore not re-exported from `catalog/__init__.py`.
   Keep `datahub_mapping.py` free of the SDK import so deriving a URN stays
   cheap; the test that asserts the URN matches `make_dataset_urn` is what keeps
@@ -303,7 +308,15 @@ all four before committing.
 - **The two catalogue integrations stay side by side, not behind an interface.**
   They share the models and the evidence-reading helpers in `publish.py`, and
   nothing else. Do not add `CatalogAdapter`, `BaseCatalog` or a registry to make
-  them symmetrical: the differences are the subject of the comparison.
+  them symmetrical: the differences are the subject of
+  `docs/catalog-comparison.md`.
+- **The comparison is a case study, not a product evaluation.** Every claim in
+  `docs/catalog-comparison.md` must be checkable against this repository — a
+  line count, a request count, a resolved package count, a test name, a measured
+  import time. Do not add vendor claims, benchmark scores, numeric rankings or
+  anything about scale, search quality or cost of ownership; the document's last
+  section lists what the experiment cannot establish, and that list is load
+  bearing. If a measured figure changes, re-measure rather than round.
 - **Deterministic code decides; AI explains.** The governance decision is
   computed from files on disk — no clock, network, catalogue, randomness or
   model. A later milestone may have an LLM explain a report; it must never
@@ -355,6 +368,10 @@ all four before committing.
 - **The MCP SDK is imported lazily in the CLI.** It costs about a second, and
   every other `bio-gov` command — including the six the pipeline shells out to
   on every run — would otherwise pay it for nothing.
+- **Commit messages contain only project-relevant content.** Do not append AI
+  authorship, co-author trailers for tools, generated-by footers, session URLs or
+  tool provenance. A commit message is the title, the explanation, and human
+  co-authors if any.
 - Line length is 100. Ruff owns formatting.
 
 ## Testing
@@ -388,7 +405,8 @@ test asserts on a known value. The CLI gets a test writing a real JSONL file and
 one proving a missing source file exits 2.
 
 Catalogue tests mock the boundary and must never need a server: CI starts
-neither OpenMetadata nor DataHub. The OpenMetadata tests mock HTTP with `respx`. A fake server keys entities the way the real one does, so
+neither OpenMetadata nor DataHub. The OpenMetadata tests mock HTTP with
+`respx`. A fake server keys entities the way the real one does, so
 a duplicate shows up as a second entry rather than an overwrite. Assert on the
 configuration defaults, the clear error when a token is missing, the entity-name
 mapping, the seven prepared assets, the preserved `bio://` identity, the file
